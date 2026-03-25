@@ -1,0 +1,56 @@
+# =============================================================================
+# Docker Compose — RAG PDF Q&A Service
+# =============================================================================
+#
+# Purpose:
+#   Orchestrates the RAG PDF Q&A service for local development.
+#   Single-service setup (the app is self-contained with in-memory/file stores).
+#
+# Services:
+#
+#   app:
+#     The FastAPI application.
+#     - Build context: current directory (Dockerfile)
+#     - Port mapping: 8000:8000
+#     - Environment: loaded from .env file
+#     - Volumes:
+#       - ./uploads:/app/uploads   (PDF storage, persists across restarts)
+#       - ./data:/app/data         (vector store persistence)
+#     - Restart policy: unless-stopped
+#     - Health check: GET /api/v1/health every 30s
+#
+# Usage:
+#   docker-compose up --build        # Build and start
+#   docker-compose up -d             # Start in background
+#   docker-compose logs -f app       # Follow logs
+#   docker-compose down              # Stop and remove containers
+#
+# Environment Variables:
+#   Loaded from .env file in project root.
+#   See .env.example for required variables.
+#
+# Scaling Notes:
+#   For production, consider:
+#   - Adding Redis service for shared session storage
+#   - Adding nginx reverse proxy for SSL termination
+#   - Using external vector DB (Pinecone, Weaviate) instead of local FAISS
+# =============================================================================
+
+# version: "3.8"  # (optional in modern Docker Compose)
+#
+# services:
+#   app:
+#     build: .
+#     ports:
+#       - "8000:8000"
+#     env_file:
+#       - .env
+#     volumes:
+#       - ./uploads:/app/uploads
+#       - ./data:/app/data
+#     restart: unless-stopped
+#     healthcheck:
+#       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+#       interval: 30s
+#       timeout: 10s
+#       retries: 3
