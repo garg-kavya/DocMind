@@ -1,0 +1,57 @@
+# =============================================================================
+# Default Configuration — RAG PDF Q&A
+# =============================================================================
+#
+# Purpose:
+#   Base configuration values loaded at startup. Environment variables
+#   and .env file values take precedence over these defaults.
+#
+# Usage:
+#   Loaded by app.config.Settings during initialization. Values here
+#   serve as documented defaults and can be overridden per-environment
+#   without modifying code.
+# =============================================================================
+
+# app:
+#   name: "RAG PDF Q&A"
+#   version: "0.1.0"
+#   debug: false
+#   log_level: "INFO"
+#   upload_dir: "./uploads"
+#   max_upload_size_mb: 50
+
+# openai:
+#   embedding_model: "text-embedding-3-small"
+#   embedding_dimensions: 1536
+#   embedding_batch_size: 100
+#   llm_model: "gpt-4o"
+#   llm_temperature: 0.1
+#   llm_max_tokens: 1024
+
+# chunking:
+#   chunk_size_tokens: 512
+#   chunk_overlap_tokens: 64
+#   split_separators:
+#     - "\n\n"
+#     - "\n"
+#     - ". "
+#     - " "
+
+# retrieval:
+#   vector_store_type: "faiss"     # "faiss" or "chroma"
+#   top_k: 5
+#   top_k_candidates: 10           # over-fetch factor for re-ranking
+#   similarity_threshold: 0.70
+#   mmr_diversity_factor: 0.3
+
+# session:
+#   ttl_minutes: 60
+#   max_conversation_turns: 10
+#   cleanup_interval_seconds: 300
+
+# server:
+#   host: "0.0.0.0"
+#   port: 8000
+#   workers: 1
+#   cors_origins:
+#     - "*"
