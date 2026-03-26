@@ -62,7 +62,7 @@ Every answer is grounded exclusively in uploaded PDF content. No prior knowledge
 ┌──────────────────────────────────────────────────────────────────┐
 │  CHAINS LAYER  (app/chains/)                                     │
 │  LLM-specific only: prompt assembly, OpenAI call, citation parse │
-│  RAGChain (LangGraph) — called by RAGPipeline only               │
+│  RAGChain — called by RAGPipeline only                           │
 └──────────────────────────────────────────────────────────────────┘
           │                     │
           ▼                     ▼
@@ -124,7 +124,7 @@ Narrowed to LLM-only concerns. Called exclusively by `RAGPipeline`.
 
 | Module | Responsibility |
 |---|---|
-| `rag_chain.py` | Build prompt, call OpenAI, extract citations, score confidence |
+| `rag_chain.py` | Build prompt, call OpenAI (direct SDK), extract citations, score confidence |
 | `prompts.py` | All prompt templates (system, context, history, reformulation) |
 
 ### Cache Layer (`app/cache/`)
@@ -151,8 +151,8 @@ Narrowed to LLM-only concerns. Called exclusively by `RAGPipeline`.
 | `vector_store` | Abstract interface: add_chunks, search, delete_document |
 | `faiss_store` | FAISS IndexFlatIP + parallel metadata dict |
 | `chroma_store` | ChromaDB persistent collection |
-| `session_store` | In-memory session CRUD with TTL expiry |
-| `document_registry` | In-memory document status and metadata tracking |
+| `session_store` | Session CRUD with TTL expiry; persists to `data/sessions.json` |
+| `document_registry` | Document status and metadata tracking; persists to `data/registry.json` |
 
 ---
 
