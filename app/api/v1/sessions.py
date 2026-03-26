@@ -1,73 +1,84 @@
-"""
-Session Management Endpoints
-==============================
+"""Session management endpoints."""
+from __future__ import annotations
 
-Purpose:
-    Manages conversational Q&A sessions. A session ties together uploaded
-    documents and conversation history for multi-turn interactions.
+from datetime import datetime
 
-Endpoints:
+from fastapi import APIRouter, Depends
 
-    POST /api/v1/sessions
-        Create a new conversational session.
+from app.cache.response_cache import ResponseCache
+from app.db.session_store import SessionStore
+from app.dependencies import get_response_cache, get_session_store
+from app.exceptions import SessionNotFoundError
+from app.schemas.session import (
+    ConversationTurnSchema,
+    SessionCreateRequest,
+    SessionCreateResponse,
+    SessionDeleteResponse,
+    SessionDetailResponse,
+)
 
-        Request Body (JSON):
-            {
-                "document_ids": [str] | null,   # optional: pre-load documents
-                "config_overrides": dict | null  # optional: per-session config
-            }
+router = APIRouter(prefix="/sessions", tags=["sessions"])
 
-        Response: 201 Created
-            {
-                "session_id": str,
-                "document_ids": [str],
-                "created_at": datetime,
-                "expires_at": datetime,
-                "message": "Session created successfully"
-            }
 
-    GET /api/v1/sessions/{session_id}
-        Retrieve session details including full conversation history.
+@router.post("", response_model=SessionCreateResponse, status_code=201)
+async def create_session(
+    body: SessionCreateRequest,
+    store: SessionStore = Depends(get_session_store),
+):
+    session = await store.create_session(body.document_ids or [])
+    expires_at = store.expires_at(session)
+    return SessionCreateResponse(
+        session_id=session.session_id,
+        document_ids=session.document_ids,
+        created_at=session.created_at,
+        expires_at=expires_at,
+        message="Session created successfully.",
+    )
 
-        Response: 200 OK
-            {
-                "session_id": str,
-                "document_ids": [str],
-                "conversation_history": [
-                    {
-                        "turn_index": int,
-                        "user_query": str,
-                        "standalone_query": str,
-                        "assistant_response": str,
-                        "citations": [...],
-                        "timestamp": datetime
-                    }
-                ],
-                "turn_count": int,
-                "created_at": datetime,
-                "last_active_at": datetime,
-                "expires_at": datetime
-            }
 
-        Errors:
-            404 — Session not found or expired
+@router.get("/{session_id}", response_model=SessionDetailResponse)
+async def get_session(
+    session_id: str,
+    store: SessionStore = Depends(get_session_store),
+):
+    session = await store.get_session(session_id)
+    if session is None:
+        raise SessionNotFoundError(f"Session {session_id} not found or expired.")
+    expires_at = store.expires_at(session)
+    history = [
+        ConversationTurnSchema(
+            turn_index=i,
+            user_query=t.user_query,
+            standalone_query=t.standalone_query,
+            assistant_response=t.assistant_response,
+            citations=[],
+            timestamp=t.timestamp,
+        )
+        for i, t in enumerate(session.conversation_history)
+    ]
+    return SessionDetailResponse(
+        session_id=session.session_id,
+        document_ids=session.document_ids,
+        conversation_history=history,
+        turn_count=session.turn_count,
+        created_at=session.created_at,
+        last_active_at=session.last_active_at,
+        expires_at=expires_at,
+    )
 
-    DELETE /api/v1/sessions/{session_id}
-        End a session and clear its conversation history.
 
-        Response: 200 OK
-            {
-                "session_id": str,
-                "message": "Session deleted successfully",
-                "turns_cleared": int
-            }
-
-        Errors:
-            404 — Session not found
-
-Dependencies:
-    - fastapi (APIRouter, Depends, HTTPException)
-    - app.schemas.session (all session schemas)
-    - app.dependencies (get_session_store)
-    - app.db.session_store (SessionStore)
-"""
+@router.delete("/{session_id}", response_model=SessionDeleteResponse)
+async def delete_session(
+    session_id: str,
+    store: SessionStore = Depends(get_session_store),
+    response_cache: ResponseCache = Depends(get_response_cache),
+):
+    turns_cleared = await store.delete_session(session_id)
+    if turns_cleared is None:
+        raise SessionNotFoundError(f"Session {session_id} not found.")
+    await response_cache.invalidate_session(session_id)
+    return SessionDeleteResponse(
+        session_id=session_id,
+        message="Session deleted successfully.",
+        turns_cleared=turns_cleared,
+    )

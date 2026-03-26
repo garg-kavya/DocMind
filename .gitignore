@@ -44,3 +44,12 @@ htmlcov/
 
 # Ruff
 .ruff_cache/
+
+# Claude Code IDE settings
+.claude/
+
+# Logs
+*.log
+
+# Test PDFs
+test_*.pdf

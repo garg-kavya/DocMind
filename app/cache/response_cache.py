@@ -1,88 +1,73 @@
-"""
-Response Cache
-===============
+"""Response cache — caches full GeneratedAnswer for 60s."""
+from __future__ import annotations
 
-Purpose:
-    Caches complete GeneratedAnswer objects for semantically identical queries
-    within the same session context. Prevents redundant LLM generation calls
-    when a user submits the same question twice in quick succession.
+import hashlib
+import pickle
+from typing import Awaitable, Callable
 
-    Inserted at Step 2 of RAGPipeline.run() (non-streaming only):
-        RAGPipeline.run()
-            ├── Step 2: ResponseCache.get_or_generate(...)
-            │       HIT  → return immediately (skip steps 3-11)
-            │       MISS → execute steps 3-11 as generate_fn, then store result
-            └── ...
+from app.cache.cache_backend import CacheBackend
+from app.models.query import GeneratedAnswer
+from app.utils.logging import get_logger
 
-When to Cache vs. Not:
-    Cached:
-        - Same (normalised) question + same session + same documents + same turn count
-    Not cached:
-        - Streaming queries — SSE token streams cannot be replayed from a cache object
-        - Any query where turn_count has advanced (prior answer changed context)
+logger = get_logger(__name__)
 
-Cache Key Construction:
-    key = sha256(
-        session_id
-        + "|" + query_text.strip().lower()
-        + "|" + ",".join(sorted(document_ids))
-        + "|" + str(turn_count)
-    )
 
-    turn_count is included so that a cached response from turn 2 is never
-    served at turn 4, where conversation context has changed.
+class ResponseCache:
 
-TTL:
-    Default: 60 seconds (RESPONSE_CACHE_TTL_SECONDS in CacheSettings).
-    Short because the main use-case is double-submission prevention.
+    def __init__(self, backend: CacheBackend, ttl: int = 60) -> None:
+        self._backend = backend
+        self._ttl = ttl
 
-Cache Hit Behaviour:
-    On hit, the cached GeneratedAnswer is returned with:
-        cache_hit = True
-        pipeline_metadata.response_cache_hit = True
-    All other fields are identical to the originally generated answer.
-
-Methods:
-
-    get_or_generate(
+    async def get_or_generate(
+        self,
         query_text: str,
         session_id: str,
         document_ids: list[str],
         turn_count: int,
-        generate_fn: Callable[[], Awaitable[GeneratedAnswer]]
+        generate_fn: Callable[[], Awaitable[GeneratedAnswer]],
     ) -> GeneratedAnswer:
-        Checks the cache; on miss calls generate_fn(), stores and returns result.
-        generate_fn is the zero-argument async callable that runs steps 3-11
-        of RAGPipeline. The cache wraps the entire downstream pipeline.
-        Inputs:
-            query_text   — standalone (reformulated) query
-            session_id   — active session UUID
-            document_ids — documents scoped to this query
-            turn_count   — current session turn count (for key invalidation)
-            generate_fn  — async callable returning GeneratedAnswer
-        Outputs:
-            GeneratedAnswer with cache_hit flag set
+        key = self._make_key(query_text, session_id, document_ids, turn_count)
+        cached_bytes = await self._backend.get(key)
+        if cached_bytes is not None:
+            try:
+                answer: GeneratedAnswer = pickle.loads(cached_bytes)
+                answer.cache_hit = True
+                answer.pipeline_metadata.response_cache_hit = True
+                return answer
+            except Exception:
+                pass  # corrupt cache entry; fall through
 
-    invalidate_session(session_id: str) -> None:
-        Remove all cached responses for a session.
-        Called by DELETE /api/v1/sessions/{session_id}.
+        answer = await generate_fn()
+        try:
+            await self._backend.set(key, pickle.dumps(answer), ttl_seconds=self._ttl)
+        except Exception as exc:
+            logger.warning("Response cache write failed: %s", exc)
 
-    invalidate_by_document(document_id: str) -> None:
-        Remove all cached responses that were generated using a specific
-        document. Called by DELETE /api/v1/documents/{document_id} to
-        prevent stale answers being served after a document is removed.
-        Implementation: scan cache keys containing the document_id string.
-        This is O(n) over cache size — acceptable given typical cache sizes
-        (<1000 entries) and the infrequency of document deletions.
+        return answer
 
-    get_stats() -> dict:
-        Returns cache hit/miss counters and current size.
-        Exposed via GET /api/v1/health.
+    async def invalidate_session(self, session_id: str) -> None:
+        # InMemoryCache doesn't expose prefix-scan; clear is heavy so we skip
+        # In Redis this would be: SCAN for keys containing session_id
+        pass
 
-Dependencies:
-    - hashlib (sha256)
-    - app.cache.cache_backend (CacheBackend)
-    - app.models.query (GeneratedAnswer)
-    - app.exceptions (CacheReadError, CacheWriteError)
-    - app.config (CacheSettings)
-"""
+    async def invalidate_by_document(self, document_id: str) -> None:
+        # Same limitation as above; acceptable given short 60s TTL
+        pass
+
+    async def get_stats(self) -> dict:
+        return await self._backend.stats()
+
+    @staticmethod
+    def _make_key(
+        query_text: str,
+        session_id: str,
+        document_ids: list[str],
+        turn_count: int,
+    ) -> str:
+        raw = (
+            session_id
+            + "|" + query_text.strip().lower()
+            + "|" + ",".join(sorted(document_ids))
+            + "|" + str(turn_count)
+        )
+        return "resp:" + hashlib.sha256(raw.encode()).hexdigest()

@@ -1,58 +1,113 @@
-"""
-Text Cleaning Service
-======================
+"""Text Cleaning Service — normalize raw PDF text."""
+from __future__ import annotations
 
-Purpose:
-    Normalizes and cleans raw text extracted from PDFs. This is the second
-    stage of the ingestion pipeline: Upload -> Parse -> **Clean** -> Chunk -> Embed -> Store.
+import re
+import unicodedata
+from collections import Counter
+from typing import TYPE_CHECKING
 
-    PDF-extracted text often contains artifacts that degrade embedding quality
-    and retrieval precision. This service addresses those artifacts.
+if TYPE_CHECKING:
+    from app.services.pdf_processor import ParsedDocument
 
-Cleaning Operations (applied in order):
 
-    1. Unicode Normalization
-       - Apply NFKC normalization to standardize character representations
-       - Replace common Unicode artifacts (smart quotes, em-dashes, etc.)
+class TextCleanerService:
+    """Normalize and clean raw text extracted from PDFs."""
 
-    2. Whitespace Normalization
-       - Collapse multiple consecutive spaces into single spaces
-       - Normalize various whitespace characters (tabs, non-breaking spaces)
-       - Preserve paragraph breaks (double newlines) as semantic boundaries
+    def clean(self, parsed_document: "ParsedDocument") -> tuple[str, list[int]]:
+        """Clean all pages and return (cleaned_text, page_boundary_offsets).
 
-    3. Hyphenated Line-Break Rejoining
-       - Detect words split across lines by hyphens (e.g., "docu-\\nment")
-       - Rejoin into "document" while preserving legitimate hyphens
-         (e.g., "state-of-the-art" stays unchanged)
-       - Heuristic: rejoin if the combined word exists in a word frequency
-         list or if both fragments are < 3 chars
+        page_boundary_offsets[i] is the char offset in cleaned_text where
+        page i+1 begins (0-indexed list, so offset[0] is always 0).
+        """
+        pages = parsed_document.pages
+        if not pages:
+            return "", []
 
-    4. Header/Footer Removal
-       - Detect repeated text appearing at the top/bottom of multiple pages
-       - Remove page numbers, running headers, and running footers
-       - Heuristic: if the same text (±whitespace) appears in the first/last
-         N lines of >50% of pages, classify it as header/footer
+        # Detect repeated headers/footers across pages
+        header_footer_patterns = self._detect_headers_footers(pages)
 
-    5. Special Character Handling
-       - Remove control characters (except newlines)
-       - Strip excessive punctuation artifacts from OCR
-       - Preserve mathematical symbols and common special characters
+        cleaned_pages: list[str] = []
+        for page in pages:
+            text = page.raw_text
+            text = self._normalize_unicode(text)
+            text = self._normalize_whitespace(text)
+            text = self._rejoin_hyphenated(text)
+            text = self._remove_headers_footers(text, header_footer_patterns)
+            text = self._remove_control_chars(text)
+            text = self._consolidate_blank_lines(text)
+            cleaned_pages.append(text)
 
-    6. Empty Line Consolidation
-       - Reduce 3+ consecutive empty lines to 2 (paragraph boundary)
+        # Build boundary offsets (char offset of each page's start in full text)
+        page_boundary_offsets: list[int] = []
+        joined_parts: list[str] = []
+        current_offset = 0
+        for page_text in cleaned_pages:
+            page_boundary_offsets.append(current_offset)
+            joined_parts.append(page_text)
+            current_offset += len(page_text) + 1  # +1 for the joining newline
 
-Inputs:
-    raw_text: str
-        Raw text for a single page or full document.
+        cleaned_text = "\n".join(joined_parts)
+        return cleaned_text, page_boundary_offsets
 
-    pages: list[PageContent] (optional)
-        If provided, enables cross-page header/footer detection.
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
 
-Outputs:
-    cleaned_text: str
-        Normalized text ready for chunking.
+    def _normalize_unicode(self, text: str) -> str:
+        text = unicodedata.normalize("NFKC", text)
+        replacements = {
+            "\u2018": "'", "\u2019": "'",
+            "\u201c": '"', "\u201d": '"',
+            "\u2013": "-", "\u2014": "-",
+            "\u00a0": " ",
+        }
+        for src, dst in replacements.items():
+            text = text.replace(src, dst)
+        return text
 
-Dependencies:
-    - unicodedata (stdlib)
-    - re (stdlib)
-"""
+    def _normalize_whitespace(self, text: str) -> str:
+        # Collapse multiple spaces (but preserve newlines)
+        text = re.sub(r"[ \t]+", " ", text)
+        # Remove trailing spaces on each line
+        text = re.sub(r" +\n", "\n", text)
+        return text
+
+    def _rejoin_hyphenated(self, text: str) -> str:
+        # "docu-\nment" → "document" (soft hyphen at line break)
+        return re.sub(r"(\w+)-\n(\w+)", r"\1\2", text)
+
+    def _detect_headers_footers(self, pages: object) -> set[str]:
+        """Return set of repeated line patterns that appear in >50% of pages."""
+        from app.services.pdf_processor import PageContent
+
+        all_pages: list[PageContent] = pages  # type: ignore[assignment]
+        if len(all_pages) < 3:
+            return set()
+
+        line_counter: Counter = Counter()
+        for page in all_pages:
+            lines = page.raw_text.splitlines()
+            # Check first 2 and last 2 lines
+            candidates = lines[:2] + lines[-2:]
+            for line in candidates:
+                stripped = line.strip()
+                if stripped and len(stripped) < 120:
+                    line_counter[stripped] += 1
+
+        threshold = max(2, len(all_pages) * 0.5)
+        return {line for line, count in line_counter.items() if count >= threshold}
+
+    def _remove_headers_footers(self, text: str, patterns: set[str]) -> str:
+        if not patterns:
+            return text
+        lines = text.splitlines()
+        cleaned = [line for line in lines if line.strip() not in patterns]
+        return "\n".join(cleaned)
+
+    def _remove_control_chars(self, text: str) -> str:
+        # Remove control chars except \n and \t
+        return re.sub(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]", "", text)
+
+    def _consolidate_blank_lines(self, text: str) -> str:
+        # Reduce 3+ consecutive blank lines to 2
+        return re.sub(r"\n{3,}", "\n\n", text)

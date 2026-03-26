@@ -1,71 +1,60 @@
-"""
-Memory Manager
-===============
+"""Memory Manager — orchestrates history read/write for RAGPipeline."""
+from __future__ import annotations
 
-Purpose:
-    Orchestrates all conversational memory operations for a single session.
-    Acts as the interface between the RAG chain and the underlying persistence
-    (SessionStore) and formatting (ContextBuilder, MemoryCompressor) layers.
+from app.db.session_store import SessionStore
+from app.memory.context_builder import ContextBuilder
+from app.memory.memory_compressor import MemoryCompressor
+from app.models.query import Citation
+from app.models.session import ConversationTurn
+from app.utils.logging import get_logger
 
-    The RAG chain calls this module at two points:
-    1. Before generation — to read formatted history for prompt injection.
-    2. After generation — to persist the new turn and trigger compression
-       if the session has grown long.
+logger = get_logger(__name__)
 
-Responsibilities:
 
-    Reading memory (pre-generation):
-        1. Fetch the session's ConversationTurn list from SessionStore.
-        2. Delegate to ContextBuilder to serialise turns into a prompt string,
-           respecting a token budget (default: 1024 tokens for history).
-        3. Return the formatted context string to the RAG chain.
+class MemoryManager:
 
-    Writing memory (post-generation):
-        1. Construct a new ConversationTurn from the completed query/response.
-        2. Delegate to SessionStore.update_session() to append the turn.
-        3. If turn_count > COMPRESSION_THRESHOLD, delegate to MemoryCompressor
-           to summarise the oldest turns and replace them with a summary turn.
+    def __init__(
+        self,
+        session_store: SessionStore,
+        context_builder: ContextBuilder,
+        compressor: MemoryCompressor,
+    ) -> None:
+        self._store = session_store
+        self._builder = context_builder
+        self._compressor = compressor
 
-    Compression policy:
-        Default COMPRESSION_THRESHOLD = MAX_CONVERSATION_TURNS (10).
-        When turn_count reaches the threshold, the oldest 5 turns are replaced
-        with a single SummaryTurn. This keeps history bounded while preserving
-        context from early in the session.
-
-Methods:
-
-    get_formatted_history(
+    async def get_formatted_history(
+        self,
         session_id: str,
-        token_budget: int = 1024
+        token_budget: int = 1024,
     ) -> str:
-        Reads the session history and returns a formatted string for prompt
-        injection. Applies token trimming if necessary.
-        Inputs:
-            session_id: the active session
-            token_budget: max tokens to allocate to history in the prompt
-        Outputs:
-            Formatted history string (may be empty string for first turn)
+        session = await self._store.get_session(session_id)
+        if session is None or not session.conversation_history:
+            return ""
+        return self._builder.build(session.conversation_history, token_budget)
 
-    record_turn(
+    async def record_turn(
+        self,
         session_id: str,
         user_query: str,
         standalone_query: str,
         assistant_response: str,
         retrieved_chunk_ids: list[str],
-        citations: list[Citation]
+        citations: list[Citation],
     ) -> None:
-        Persists a completed conversation turn. Triggers compression if needed.
-        Inputs: all fields of a ConversationTurn plus Citation list
-        Outputs: None (side effect: session store updated)
+        turn = ConversationTurn(
+            user_query=user_query,
+            standalone_query=standalone_query,
+            assistant_response=assistant_response,
+            retrieved_chunk_ids=retrieved_chunk_ids,
+            citations=citations,
+        )
+        session = await self._store.update_session(session_id, turn)
 
-    get_turn_count(session_id: str) -> int:
-        Returns the current number of turns in the session.
+        if self._compressor.should_compress(session.turn_count):
+            compressed = await self._compressor.compress(session.conversation_history)
+            await self._store.replace_history(session_id, compressed)
 
-Dependencies:
-    - app.db.session_store (SessionStore)
-    - app.memory.context_builder (ContextBuilder)
-    - app.memory.memory_compressor (MemoryCompressor)
-    - app.models.session (ConversationTurn)
-    - app.models.query (Citation)
-    - app.config (SessionSettings)
-"""
+    async def get_turn_count(self, session_id: str) -> int:
+        session = await self._store.get_session(session_id)
+        return session.turn_count if session else 0

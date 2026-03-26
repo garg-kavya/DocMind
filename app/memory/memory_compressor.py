@@ -1,59 +1,72 @@
-"""
-Memory Compressor
-==================
+"""Memory Compressor — summarise old turns to keep history bounded."""
+from __future__ import annotations
 
-Purpose:
-    Summarises the oldest conversation turns in a session when the history
-    grows beyond the compression threshold. Prevents context window overflow
-    for long sessions while retaining the gist of earlier exchanges.
+from openai import AsyncOpenAI
 
-    Without compression, sessions reaching MAX_CONVERSATION_TURNS (10) simply
-    drop the oldest turns. This loses information that may be referenced later
-    ("go back to what you said about X earlier"). Compression preserves a
-    compact representation of those early turns.
+from app.config import Settings
+from app.models.session import ConversationTurn
+from app.utils.logging import get_logger
 
-Strategy:
-    When MemoryManager detects turn_count > COMPRESSION_THRESHOLD:
-    1. Take the oldest N turns (default N=5).
-    2. Serialise them as a Q&A transcript.
-    3. Call the LLM with a summarisation prompt: "Summarise the following
-       conversation concisely, preserving all factual details mentioned."
-    4. Replace the N turns with a single SummaryTurn containing the summary.
-    5. Remaining (recent) turns are kept verbatim.
+logger = get_logger(__name__)
 
-    Result: a session with 10 turns becomes a session with 1 summary turn
-    + 5 recent verbatim turns, keeping total token cost bounded.
+_SUMMARIZE_PROMPT = """\
+Summarize the following conversation concisely, preserving all key facts \
+and decisions mentioned. Write in third person.
 
-SummaryTurn:
-    A special ConversationTurn subtype used by ContextBuilder to render
-    the summary with a distinct prefix ("Summary of earlier conversation:").
-    Fields:
-        is_summary: bool = True
-        summary_text: str       — the compressed summary
-        turns_covered: int      — how many original turns this replaces
-        original_turn_range: tuple[int, int]  — (first_index, last_index)
+Conversation:
+{transcript}
 
-Methods:
+Summary:"""
 
-    compress(
+
+class MemoryCompressor:
+
+    def __init__(self, settings: Settings) -> None:
+        self._client = AsyncOpenAI(api_key=settings.openai_api_key)
+        self._threshold = settings.compression_threshold
+        self._n_compress = settings.compression_turns
+
+    def should_compress(self, turn_count: int) -> bool:
+        return turn_count >= self._threshold
+
+    async def compress(
+        self,
         turns: list[ConversationTurn],
-        n_turns_to_compress: int = 5
+        n_turns_to_compress: int | None = None,
     ) -> list[ConversationTurn]:
-        Takes the full turn list; compresses the oldest n_turns_to_compress
-        into a summary; returns the modified list.
-        Inputs:
-            turns: full session history (oldest first)
-            n_turns_to_compress: how many of the oldest turns to collapse
-        Outputs:
-            Modified list: [SummaryTurn] + remaining verbatim turns
-        Side effects: one LLM API call (gpt-4o-mini, cheap summarisation task)
+        n = n_turns_to_compress or self._n_compress
+        if len(turns) <= n:
+            return turns
 
-    should_compress(turn_count: int) -> bool:
-        Returns True if compression should be triggered.
-        Threshold: COMPRESSION_THRESHOLD from app.config.SessionSettings.
+        to_compress = turns[:n]
+        remaining = turns[n:]
 
-Dependencies:
-    - openai (AsyncOpenAI — for summarisation call)
-    - app.models.session (ConversationTurn)
-    - app.config (SessionSettings, OpenAISettings)
-"""
+        transcript = "\n".join(
+            f"User: {t.user_query}\nAssistant: {t.assistant_response}"
+            for t in to_compress
+        )
+        prompt = _SUMMARIZE_PROMPT.format(transcript=transcript)
+
+        try:
+            response = await self._client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=300,
+            )
+            summary_text = response.choices[0].message.content or ""
+        except Exception as exc:
+            logger.warning("Memory compression failed: %s; keeping raw turns", exc)
+            return turns
+
+        summary_turn = ConversationTurn(
+            user_query="",
+            standalone_query="",
+            assistant_response="",
+            retrieved_chunk_ids=[],
+            is_summary=True,
+            summary_text=summary_text.strip(),
+            turns_covered=n,
+        )
+        logger.info("Compressed %d turns into summary", n)
+        return [summary_turn] + remaining

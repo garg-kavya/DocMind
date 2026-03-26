@@ -1,55 +1,37 @@
-"""
-Session Domain Model
-=====================
+"""Session and ConversationTurn domain models."""
+from __future__ import annotations
 
-Purpose:
-    Represents a conversational Q&A session. A session binds together:
-    - A set of uploaded documents (the knowledge base for this conversation)
-    - A conversation history (for multi-turn follow-up questions)
-    - Session-level configuration overrides (optional)
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import TYPE_CHECKING
 
-Attributes:
-    session_id: str (UUID4)
-        Unique session identifier, returned to the client on creation.
+if TYPE_CHECKING:
+    from app.models.query import Citation
 
+
+@dataclass
+class ConversationTurn:
+    user_query: str
+    standalone_query: str
+    assistant_response: str
+    retrieved_chunk_ids: list[str]
+    citations: list["Citation"] = field(default_factory=list)
+    timestamp: datetime = field(default_factory=datetime.utcnow)
+    is_summary: bool = False
+    summary_text: str | None = None
+    turns_covered: int = 0
+
+
+@dataclass
+class Session:
     document_ids: list[str]
-        List of document_id values that are part of this session's
-        knowledge base. Retrieval is scoped to these documents.
+    session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    conversation_history: list[ConversationTurn] = field(default_factory=list)
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    last_active_at: datetime = field(default_factory=datetime.utcnow)
+    config_overrides: dict | None = None
 
-    conversation_history: list[ConversationTurn]
-        Ordered list of (user_query, assistant_response, retrieved_chunk_ids,
-        timestamp) tuples. Capped at MAX_CONVERSATION_TURNS (default: 10).
-
-    created_at: datetime
-        When the session was created.
-
-    last_active_at: datetime
-        Updated on every interaction. Used for TTL-based cleanup.
-
-    config_overrides: dict | None
-        Optional per-session overrides (e.g., different top_k, chunk_size
-        for experimentation).
-
-    ConversationTurn (nested dataclass):
-        user_query: str
-            The original question asked by the user.
-        standalone_query: str
-            The reformulated standalone version (after conversational
-            context is resolved).
-        assistant_response: str
-            The generated answer.
-        retrieved_chunk_ids: list[str]
-            Chunk IDs used to generate this answer (for auditability).
-        timestamp: datetime
-
-Lifecycle:
-    - Created via POST /api/v1/sessions
-    - Populated as documents are uploaded and queries are made
-    - Expired and cleaned up after SESSION_TTL_MINUTES of inactivity
-    - Explicitly deletable via DELETE /api/v1/sessions/{session_id}
-
-Dependencies:
-    - uuid
-    - datetime
-    - dataclasses
-"""
+    @property
+    def turn_count(self) -> int:
+        return len(self.conversation_history)

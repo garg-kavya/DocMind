@@ -1,63 +1,41 @@
-"""
-Dockerfile — RAG PDF Q&A Service
-==================================
+# ── Stage 1: build ──────────────────────────────────────────────────────────
+FROM python:3.12-slim AS builder
 
-Purpose:
-    Multi-stage Docker build for the RAG PDF Q&A application.
-    Produces a minimal production image with all dependencies.
+WORKDIR /build
 
-Build Stages:
+# Install build tools needed for faiss-cpu and numpy C extensions
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
 
-    Stage 1: builder
-        - Base: python:3.12-slim
-        - Installs build dependencies (gcc, etc. for faiss-cpu, numpy)
-        - Installs Python packages from pyproject.toml
-        - Compiles any C extensions
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-    Stage 2: runtime
-        - Base: python:3.12-slim
-        - Copies installed packages from builder (no build tools)
-        - Copies application source code
-        - Creates non-root user for security
-        - Creates upload and data directories
-        - Exposes port 8000
 
-Entrypoint:
-    uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+# ── Stage 2: runtime ────────────────────────────────────────────────────────
+FROM python:3.12-slim AS runtime
 
-    Single worker because:
-    - FAISS index is in-process memory (not shared across workers)
-    - Session store is in-process memory
-    - Scaling is done at container level (multiple containers)
+# Copy installed packages from builder (no build tools in final image)
+COPY --from=builder /install /usr/local
 
-Environment Variables (required at runtime):
-    - OPENAI_API_KEY: OpenAI API key for embeddings and LLM
-    - See .env.example for full list
+WORKDIR /app
 
-Volumes:
-    - /app/uploads: PDF upload storage (mount for persistence)
-    - /app/data: Vector store persistence (mount for persistence)
+# Copy only application source — no tests, docs, scripts, or secrets
+COPY app/ ./app/
+COPY pyproject.toml .
 
-Health Check:
-    GET http://localhost:8000/api/v1/health every 30s
+# Non-root user for security
+RUN useradd -m -u 1000 appuser \
+    && mkdir -p uploads data \
+    && chown -R appuser:appuser /app
 
-Image Size Target: < 500MB
-"""
+USER appuser
 
-# --- THIS FILE CONTAINS THE DOCKERFILE SPECIFICATION ---
-# --- Implementation: standard multi-stage Python build ---
-#
-# FROM python:3.12-slim AS builder
-# WORKDIR /app
-# COPY pyproject.toml .
-# RUN pip install --no-cache-dir .
-#
-# FROM python:3.12-slim AS runtime
-# COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
-# COPY . /app
-# WORKDIR /app
-# RUN useradd -m appuser && chown -R appuser /app
-# USER appuser
-# EXPOSE 8000
-# HEALTHCHECK CMD curl -f http://localhost:8000/api/v1/health || exit 1
-# CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Railway injects PORT; fall back to 8000 for local docker run
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:${PORT:-8000}/api/v1/health')" || exit 1
+
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]

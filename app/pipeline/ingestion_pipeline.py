@@ -1,116 +1,117 @@
-"""
-Ingestion Pipeline — PDF Processing Orchestrator
-=================================================
+"""Ingestion Pipeline — PDF → parse → clean → chunk → embed → store."""
+from __future__ import annotations
 
-Purpose:
-    Orchestrates the complete PDF ingestion workflow from raw uploaded file
-    to indexed vectors. Called by the documents API handler after file upload
-    validation. Runs asynchronously in a background task so the API returns
-    202 Accepted immediately while processing continues.
+import time
 
-    Like RAGPipeline for queries, this is the single authoritative place
-    that knows the ingestion stage order and error recovery strategy.
+from app.db.document_registry import DocumentRegistry
+from app.db.session_store import SessionStore
+from app.db.vector_store import VectorStore
+from app.exceptions import EmbeddingAPIError, PDFParsingError, StorageWriteError
+from app.schemas.metadata import IngestionMetadata
+from app.services.chunker import ChunkerService
+from app.services.embedder import EmbedderService
+from app.services.pdf_processor import PDFProcessorService
+from app.services.text_cleaner import TextCleanerService
+from app.utils.logging import get_logger
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Full Execution Flow
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+logger = get_logger(__name__)
 
-  0. PRE-CONDITIONS (enforced by calling API handler, not here)
-     ├── File is a valid PDF (MIME check, magic bytes)
-     ├── File size ≤ MAX_UPLOAD_SIZE_MB
-     └── file_path exists on disk and document_id is registered with status="uploaded"
 
-  1. STATUS UPDATE → "processing"
-     └── DocumentRegistry.update_status(document_id, "processing")
+class IngestionPipeline:
 
-  2. PDF PARSING
-     ├── PDFProcessorService.parse(file_path, document_id)
-     │       → tries PyMuPDF first
-     │       → falls back to pdfplumber if chars_per_page < threshold
-     ├── Returns: ParsedDocument (pages, pdf_metadata, parser_used)
-     ├── On PDFParsingError:
-     │       → update status = "error"
-     │       → re-raise (API error handler formats response)
-     └── Attaches PDFMetadata to document record
+    def __init__(
+        self,
+        pdf_processor: PDFProcessorService,
+        text_cleaner: TextCleanerService,
+        chunker: ChunkerService,
+        embedder: EmbedderService,
+        vector_store: VectorStore,
+        document_registry: DocumentRegistry,
+        session_store: SessionStore,
+        embedding_model: str = "text-embedding-3-small",
+    ) -> None:
+        self._pdf = pdf_processor
+        self._cleaner = text_cleaner
+        self._chunker = chunker
+        self._embedder = embedder
+        self._store = vector_store
+        self._registry = document_registry
+        self._sessions = session_store
+        self._embedding_model = embedding_model
 
-  3. TEXT CLEANING
-     ├── TextCleanerService.clean(parsed_document)
-     │       → Unicode normalisation, whitespace, headers/footers, etc.
-     └── Returns: cleaned_text, page_boundary_offsets
-
-  4. CHUNKING
-     ├── ChunkerService.chunk(
-     │       cleaned_text, page_boundary_offsets,
-     │       document_id, document_name)
-     │       → Recursive character split at 512 tokens / 64 overlap
-     └── Returns: list[Chunk] with metadata populated
-
-  5. BATCH EMBEDDING
-     ├── EmbedderService.embed_chunks(chunks)
-     │       → Batched OpenAI Embeddings API calls (100 chunks/batch)
-     │       → Populates chunk.embedding on each Chunk
-     ├── On EmbeddingAPIError / EmbeddingTimeoutError:
-     │       → update status = "error"
-     │       → re-raise
-     └── Returns: list[Chunk] with embeddings
-
-  6. VECTOR STORAGE
-     ├── VectorStore.add_chunks(chunks)
-     │       → Stores vectors + ChunkMetadata for each chunk
-     ├── On StorageWriteError:
-     │       → update status = "error"
-     │       → re-raise
-     └── Returns: count of vectors stored
-
-  7. STATUS UPDATE → "ready" + INGESTION METADATA
-     ├── DocumentRegistry.update_status(document_id, "ready")
-     └── DocumentRegistry.set_ingestion_metadata(document_id,
-               IngestionMetadata(
-                   document_id, filename, page_count,
-                   total_chunks=len(chunks),
-                   total_tokens=sum(c.token_count for c in chunks),
-                   parser_used, ingestion_time_ms, embedding_model))
-
-  8. SESSION ASSOCIATION (if session_id was provided)
-     └── SessionStore.add_document_to_session(session_id, document_id)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Methods
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    run(
+    async def run(
+        self,
         file_path: str,
         document_id: str,
         filename: str,
-        session_id: str | None = None
+        session_id: str | None = None,
     ) -> IngestionMetadata:
-        Runs the full ingestion pipeline synchronously.
-        Intended to be called inside asyncio.to_thread() or a
-        BackgroundTask so it doesn't block the event loop.
-        Inputs:
-            file_path   — absolute path to the saved PDF on disk
-            document_id — pre-assigned UUID for this document
-            filename    — original uploaded filename (for metadata)
-            session_id  — if provided, associates doc with this session
-        Outputs:
-            IngestionMetadata (summary of what was processed)
-        Raises:
-            PDFParsingError     — PDF could not be parsed
-            EmbeddingAPIError   — embedding call failed
-            StorageWriteError   — vector store write failed
+        t0 = time.monotonic()
+        logger.info("Starting ingestion for %s", filename, extra={"document_id": document_id})
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Dependencies
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # Step 1 — status → processing
+        await self._registry.update_status(document_id, "processing")
 
-    app.services.pdf_processor   (PDFProcessorService)
-    app.services.text_cleaner    (TextCleanerService)
-    app.services.chunker         (ChunkerService)
-    app.services.embedder        (EmbedderService)
-    app.db.vector_store          (VectorStore)
-    app.db.session_store         (SessionStore — optional association)
-    app.db.document_registry     (DocumentRegistry — status tracking)
-    app.schemas.metadata         (IngestionMetadata, PDFMetadata, ChunkMetadata)
-    app.exceptions               (PDFParsingError, EmbeddingAPIError, StorageWriteError)
-    app.config                   (Settings)
-"""
+        # Step 2 — PDF parsing
+        try:
+            parsed = self._pdf.parse(file_path, document_id)
+        except PDFParsingError:
+            await self._registry.update_status(document_id, "error", "PDF parsing failed.")
+            raise
+
+        # Step 3 — Text cleaning
+        cleaned_text, page_boundary_offsets = self._cleaner.clean(parsed)
+
+        # Step 4 — Chunking
+        chunks = self._chunker.chunk(
+            cleaned_text=cleaned_text,
+            page_boundary_offsets=page_boundary_offsets,
+            document_id=document_id,
+            document_name=filename,
+        )
+        logger.info("Created %d chunks", len(chunks), extra={"document_id": document_id})
+
+        # Step 5 — Batch embedding
+        try:
+            chunks = await self._embedder.embed_chunks(chunks)
+        except (EmbeddingAPIError, Exception) as exc:
+            await self._registry.update_status(document_id, "error", str(exc))
+            raise
+
+        # Step 6 — Vector storage
+        try:
+            await self._store.add_chunks(chunks)
+            await self._store.save_to_disk()
+        except StorageWriteError as exc:
+            await self._registry.update_status(document_id, "error", str(exc))
+            raise
+
+        elapsed_ms = (time.monotonic() - t0) * 1000
+
+        # Step 7 — status → ready + metadata
+        ingestion_meta = IngestionMetadata(
+            document_id=document_id,
+            filename=filename,
+            page_count=parsed.pdf_metadata.page_count,
+            total_chunks=len(chunks),
+            total_tokens=sum(c.token_count for c in chunks),
+            parser_used=parsed.parser_used,
+            ingestion_time_ms=elapsed_ms,
+            embedding_model=self._embedding_model,
+        )
+        await self._registry.update_status(document_id, "ready")
+        await self._registry.set_ingestion_metadata(
+            document_id, parsed.pdf_metadata, ingestion_meta
+        )
+
+        logger.info(
+            "Ingestion complete: %d chunks, %.0fms",
+            len(chunks), elapsed_ms,
+            extra={"document_id": document_id},
+        )
+
+        # Step 8 — Session association (optional)
+        if session_id:
+            await self._sessions.add_document_to_session(session_id, document_id)
+
+        return ingestion_meta

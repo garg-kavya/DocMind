@@ -1,23 +1,13 @@
-"""
-Main API Router
-================
+"""Central API router — registers all v1 endpoints."""
+from __future__ import annotations
 
-Purpose:
-    Aggregates all v1 endpoint routers into a single router that is
-    mounted on the FastAPI application in main.py.
+from fastapi import APIRouter
 
-Route Registration:
-    /api/v1/documents   -> documents router (PDF upload/management)
-    /api/v1/query       -> query router (question answering)
-    /api/v1/sessions    -> sessions router (conversation management)
-    /api/v1/health      -> health router (service health)
+from app.api.v1 import debug, documents, health, query, sessions
 
-    All routes are prefixed with /api/v1 for versioning.
-
-Dependencies:
-    - fastapi (APIRouter)
-    - app.api.v1.documents
-    - app.api.v1.query
-    - app.api.v1.sessions
-    - app.api.v1.health
-"""
+api_router = APIRouter(prefix="/api/v1")
+api_router.include_router(documents.router)
+api_router.include_router(sessions.router)
+api_router.include_router(query.router)
+api_router.include_router(health.router)
+api_router.include_router(debug.router)

@@ -1,0 +1,51 @@
+# Secrets — never bake into image
+.env
+.env.*
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# Dev / test artifacts
+tests/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# Docs and scripts (not needed at runtime)
+docs/
+scripts/
+configs/
+*.md
+
+# Local data — mounted as volumes in production
+uploads/
+data/
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test PDFs
+*.pdf

@@ -1,50 +1,32 @@
-"""
-Cache Backend Abstract Interface
-==================================
+"""Abstract cache backend interface."""
+from __future__ import annotations
 
-Purpose:
-    Defines the contract that every cache implementation must satisfy.
-    Allows the application to swap backends (in-memory LRU, Redis, Memcached)
-    without changing any caching consumer code.
+from abc import ABC, abstractmethod
+from typing import Any
 
-Interface Methods:
 
-    get(key: str) -> Any | None:
-        Retrieve a cached value by key.
-        Inputs:  key — the cache key string
-        Outputs: The cached value, or None on miss or error.
-        Guarantees: Never raises (swallows CacheReadError internally).
+class CacheBackend(ABC):
 
-    set(key: str, value: Any, ttl_seconds: int | None = None) -> None:
-        Store a value under a key with an optional expiry.
-        Inputs:
-            key         — the cache key string
-            value       — any JSON-serialisable object
-            ttl_seconds — seconds until auto-expiry; None = no expiry
-        Guarantees: Never raises (swallows CacheWriteError internally).
+    @abstractmethod
+    async def get(self, key: str) -> Any | None:
+        """Return cached value or None on miss."""
 
-    delete(key: str) -> None:
-        Remove a key from the cache. No-op if key does not exist.
+    @abstractmethod
+    async def set(self, key: str, value: Any, ttl_seconds: int | None = None) -> None:
+        """Store value. Never raises."""
 
-    exists(key: str) -> bool:
-        Check if a key exists without fetching its value.
-        Outputs: True if key exists and has not expired.
+    @abstractmethod
+    async def delete(self, key: str) -> None:
+        """Remove key. No-op if missing."""
 
-    clear() -> None:
-        Remove all entries from this cache. Used in tests and on shutdown.
+    @abstractmethod
+    async def exists(self, key: str) -> bool:
+        """True if key exists and has not expired."""
 
-    stats() -> dict:
-        Return diagnostic counters for monitoring.
-        Keys: hits, misses, sets, deletes, errors, current_size
-        Used by the health check endpoint and benchmarking scripts.
+    @abstractmethod
+    async def clear(self) -> None:
+        """Remove all entries."""
 
-Serialisation Contract:
-    Implementations must handle serialisation/deserialisation of values.
-    Recommended: JSON for primitive types and Pydantic models (.model_dump()
-    on write, model_validate() on read). Embedding vectors (list[float]) are
-    stored as JSON arrays.
-
-Dependencies:
-    - abc (ABC, abstractmethod)
-    - app.exceptions (CacheReadError, CacheWriteError)
-"""
+    @abstractmethod
+    async def stats(self) -> dict:
+        """Return diagnostic counters."""

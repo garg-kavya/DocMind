@@ -1,100 +1,94 @@
-"""
-Reranking Service
-==================
+"""Reranking Service — cross-encoder second-pass relevance scoring."""
+from __future__ import annotations
 
-Purpose:
-    Applies a second-pass semantic reranker to the threshold-filtered
-    candidates produced by RetrieverService.retrieve(). Produces a more
-    accurate relevance ordering before MMR diversity selection is applied.
+from app.config import Settings
+from app.exceptions import RerankerError
+from app.models.query import ScoredChunk
+from app.utils.logging import get_logger
 
-    IMPORTANT — exact position in the pipeline (owned by RAGPipeline):
+logger = get_logger(__name__)
 
-        RetrieverService.retrieve()         stage 1+2: vector search + threshold
-            ↓  list[ScoredChunk]  (bi_encoder_score set)
-        RerankerService.rerank()            stage 3a: cross-encoder reranking
-            ↓  list[ScoredChunk]  (similarity_score updated, rerank_score set)
-        RetrieverService.apply_mmr()        stage 3b: diversity selection
-            ↓  final top_k list[ScoredChunk]
-        RAGChain.invoke()                   LLM generation
 
-Why a Dedicated Reranker:
-    RetrieverService MMR (stage 3b) addresses *diversity* — it prevents
-    returning N near-identical chunks. It does not improve relevance ordering.
+class RerankerService:
 
-    RerankerService addresses *relevance precision* — it scores (query, chunk)
-    pairs jointly using the full text of both, which is fundamentally more
-    accurate than bi-encoder cosine similarity.
+    def __init__(self, settings: Settings) -> None:
+        self._backend = settings.reranker_backend
+        self._cohere_key = settings.cohere_api_key
+        self._cross_encoder_model = settings.cross_encoder_model
+        self._cross_encoder = None  # lazy load
 
-    The two-stage design (bi-encoder + cross-encoder) is the standard
-    production approach: the fast bi-encoder narrows the candidate pool;
-    the slow cross-encoder provides high-quality scoring on the smaller set.
+    def is_enabled(self) -> bool:
+        return self._backend != "none"
 
-Score Contract:
-    Input chunks have:
-        bi_encoder_score  — cosine similarity from vector search (already set)
-        similarity_score  — equals bi_encoder_score at this point
-
-    Output chunks have:
-        bi_encoder_score  — unchanged (preserved for diagnostics)
-        rerank_score      — raw score from cross-encoder or Cohere API
-        similarity_score  — set to normalised(rerank_score) for downstream use
-                            (MMR uses similarity_score for cross-similarity calc)
-
-    If reranker is disabled (RERANKER_BACKEND="none"), this service is a
-    no-op: chunks pass through unchanged and RAGPipeline skips the call
-    entirely (guarded by is_enabled()).
-
-Backend Options:
-
-    "none"
-        Disabled. Default when RERANKER_BACKEND is not configured.
-        is_enabled() returns False; RAGPipeline does not call rerank().
-
-    "cross_encoder"
-        Local sentence-transformers CrossEncoder.
-        Model: CROSS_ENCODER_MODEL (default "cross-encoder/ms-marco-MiniLM-L-6-v2")
-        Latency: ~50-150ms for 10 candidates on CPU.
-        No API cost. Recommended for development / air-gapped environments.
-
-    "cohere"
-        Cohere Rerank API.
-        Latency: ~200-400ms.
-        Cost: ~$1 per 1000 calls.
-        Recommended for production (higher quality than local cross-encoder).
-
-Methods:
-
-    rerank(
+    async def rerank(
+        self,
         query_text: str,
-        candidates: list[ScoredChunk]
+        candidates: list[ScoredChunk],
     ) -> list[ScoredChunk]:
-        Re-scores and re-orders candidates against the query.
-        Inputs:
-            query_text  — standalone query string (NOT its embedding)
-            candidates  — threshold-filtered list from RetrieverService.retrieve()
-        Outputs:
-            list[ScoredChunk] in descending relevance order.
-            similarity_score updated; bi_encoder_score and rerank_score set.
-        Edge cases:
-            - len(candidates) == 0: returns empty list immediately.
-            - len(candidates) == 1: returns list unchanged (no reranking needed).
-        Raises:
-            RerankerError — backend call failed; RAGPipeline catches this and
-                            falls back to bi-encoder ordering (logs a warning).
+        """Re-score candidates; return sorted by reranker score descending."""
+        if not candidates:
+            return candidates
+        if len(candidates) == 1:
+            return candidates
 
-    is_enabled() -> bool:
-        Returns True if RERANKER_BACKEND != "none".
-        Called by RAGPipeline to guard the reranking step.
+        try:
+            if self._backend == "cohere":
+                return await self._rerank_cohere(query_text, candidates)
+            elif self._backend == "cross_encoder":
+                return self._rerank_cross_encoder(query_text, candidates)
+            else:
+                return candidates
+        except RerankerError:
+            raise
+        except Exception as exc:
+            raise RerankerError(f"Reranker ({self._backend}) failed: {exc}") from exc
 
-Latency Budget:
-    Cohere:       +200-400ms
-    CrossEncoder: +50-150ms
-    Combined with streaming, total time to first token remains ≤ 2s.
+    async def _rerank_cohere(
+        self, query_text: str, candidates: list[ScoredChunk]
+    ) -> list[ScoredChunk]:
+        import cohere
 
-Dependencies:
-    cohere                          (if RERANKER_BACKEND == "cohere")
-    sentence-transformers           (if RERANKER_BACKEND == "cross_encoder")
-    app.models.query                (ScoredChunk)
-    app.exceptions                  (RerankerError)
-    app.config                      (RerankerSettings)
-"""
+        if not self._cohere_key:
+            raise RerankerError("COHERE_API_KEY is not configured.")
+
+        co = cohere.AsyncClientV2(api_key=self._cohere_key)
+        docs = [sc.chunk.text for sc in candidates]
+        response = await co.rerank(
+            model="rerank-english-v3.0",
+            query=query_text,
+            documents=docs,
+            top_n=len(candidates),
+        )
+
+        max_score = max((r.relevance_score for r in response.results), default=1.0)
+        max_score = max_score or 1.0
+
+        reranked = list(candidates)
+        for r in response.results:
+            sc = reranked[r.index]
+            sc.rerank_score = r.relevance_score
+            sc.similarity_score = r.relevance_score / max_score  # normalize to [0,1]
+
+        reranked.sort(key=lambda sc: sc.rerank_score or 0, reverse=True)
+        return reranked
+
+    def _rerank_cross_encoder(
+        self, query_text: str, candidates: list[ScoredChunk]
+    ) -> list[ScoredChunk]:
+        from sentence_transformers import CrossEncoder
+
+        if self._cross_encoder is None:
+            self._cross_encoder = CrossEncoder(self._cross_encoder_model)
+
+        pairs = [(query_text, sc.chunk.text) for sc in candidates]
+        scores = self._cross_encoder.predict(pairs)
+
+        max_score = max(scores) if len(scores) > 0 else 1.0
+        max_score = max_score or 1.0
+
+        for sc, raw_score in zip(candidates, scores):
+            sc.rerank_score = float(raw_score)
+            sc.similarity_score = float(raw_score) / float(max_score)
+
+        candidates.sort(key=lambda sc: sc.rerank_score or 0, reverse=True)
+        return candidates
