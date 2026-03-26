@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 
 from app.exceptions import PDFParsingError
@@ -11,6 +12,11 @@ from app.utils.logging import get_logger
 logger = get_logger(__name__)
 
 MINIMUM_CHARS_PER_PAGE = 50  # below this, try pdfplumber fallback
+
+# If the average line length is this short, text is likely garbled (try fallback)
+_GARBLED_LINE_LENGTH_THRESHOLD = 15
+# Fraction of lines that must be short for text to be considered garbled
+_GARBLED_LINE_FRACTION = 0.6
 
 
 @dataclass
@@ -42,25 +48,39 @@ class PDFProcessorService:
 
         try:
             result = self._parse_pymupdf(file_path, document_id)
+        except PDFParsingError:
+            raise
         except Exception as exc:
-            raise PDFParsingError(f"PyMuPDF failed: {exc}", detail=str(exc)) from exc
+            logger.warning("PyMuPDF failed (%s); trying pdfplumber", exc,
+                           extra={"document_id": document_id})
+            result = None
 
-        avg_chars = result.total_chars / max(len(result.pages), 1)
-        if avg_chars < MINIMUM_CHARS_PER_PAGE:
-            logger.info(
-                "PyMuPDF yielded low char count (%.1f/page); trying pdfplumber",
-                avg_chars,
-                extra={"document_id": document_id},
-            )
+        # Decide whether PyMuPDF output is good enough
+        if result is not None:
+            avg_chars = result.total_chars / max(len(result.pages), 1)
+            if avg_chars < MINIMUM_CHARS_PER_PAGE or self._looks_garbled(result):
+                logger.info(
+                    "PyMuPDF output looks poor (%.1f chars/page); trying pdfplumber",
+                    avg_chars,
+                    extra={"document_id": document_id},
+                )
+                result = None
+
+        if result is None:
             try:
                 result = self._parse_pdfplumber(file_path, document_id)
             except Exception as exc:
-                logger.warning("pdfplumber fallback also failed: %s", exc)
+                raise PDFParsingError(
+                    f"Both PyMuPDF and pdfplumber failed to extract text: {exc}",
+                    detail=str(exc),
+                ) from exc
 
         if result.total_chars < MINIMUM_CHARS_PER_PAGE:
             raise PDFParsingError(
-                "PDF contains no extractable text. It may be scanned/image-only.",
-                detail=f"Total chars: {result.total_chars}",
+                "PDF contains no extractable text. "
+                "It may be a scanned image-only PDF. "
+                "Please use a text-based PDF.",
+                detail=f"Total chars extracted: {result.total_chars}",
             )
 
         logger.info(
@@ -71,6 +91,24 @@ class PDFProcessorService:
             extra={"document_id": document_id},
         )
         return result
+
+    # ------------------------------------------------------------------
+    # Quality check
+    # ------------------------------------------------------------------
+
+    def _looks_garbled(self, result: ParsedDocument) -> bool:
+        """Return True if the extracted text looks like garbled stream-order text."""
+        all_lines = []
+        for page in result.pages:
+            all_lines.extend(page.raw_text.splitlines())
+
+        non_empty = [l for l in all_lines if l.strip()]
+        if len(non_empty) < 5:
+            return False  # too few lines to judge
+
+        short_lines = sum(1 for l in non_empty if len(l.strip()) < _GARBLED_LINE_LENGTH_THRESHOLD)
+        fraction = short_lines / len(non_empty)
+        return fraction > _GARBLED_LINE_FRACTION
 
     # ------------------------------------------------------------------
     # Private parsers
@@ -95,7 +133,28 @@ class PDFProcessorService:
             }
 
             for i, page in enumerate(doc):
-                text = page.get_text("text")
+                # sort=True: read text top-to-bottom, left-to-right (fixes multi-column CVs)
+                text = page.get_text("text", sort=True)
+
+                # Also extract text from annotations (some PDFs use free-text annotations)
+                annot_texts: list[str] = []
+                for annot in page.annots():
+                    annot_info = annot.info
+                    if annot_info.get("content"):
+                        annot_texts.append(annot_info["content"])
+
+                if annot_texts:
+                    text = text + "\n" + "\n".join(annot_texts)
+
+                # Extract text from form fields (XFA / AcroForm)
+                widget_texts: list[str] = []
+                for widget in page.widgets():
+                    if widget.field_value and isinstance(widget.field_value, str):
+                        widget_texts.append(widget.field_value)
+
+                if widget_texts:
+                    text = text + "\n" + "\n".join(widget_texts)
+
                 pages.append(PageContent(
                     page_number=i + 1,
                     raw_text=text,
@@ -125,7 +184,15 @@ class PDFProcessorService:
 
         with pdfplumber.open(file_path) as pdf:
             for i, page in enumerate(pdf.pages):
-                text = page.extract_text() or ""
+                # x_tolerance / y_tolerance help with multi-column and tabular layouts
+                text = page.extract_text(x_tolerance=2, y_tolerance=2) or ""
+
+                # If still empty, try extracting word-by-word and joining
+                if not text.strip():
+                    words = page.extract_words(x_tolerance=2, y_tolerance=2)
+                    if words:
+                        text = _words_to_text(words)
+
                 pages.append(PageContent(
                     page_number=i + 1,
                     raw_text=text,
@@ -143,3 +210,30 @@ class PDFProcessorService:
             pdf_metadata=pdf_metadata,
             parser_used="pdfplumber",
         )
+
+
+def _words_to_text(words: list[dict]) -> str:
+    """Reconstruct readable text from pdfplumber word dicts, grouped by line."""
+    if not words:
+        return ""
+    # Sort by top (y), then x0
+    words = sorted(words, key=lambda w: (round(w["top"]), w["x0"]))
+    lines: list[list[str]] = []
+    current_y: float | None = None
+    current_line: list[str] = []
+    tolerance = 3  # pixels — words within this y-range are on the same line
+
+    for w in words:
+        y = round(w["top"])
+        if current_y is None or abs(y - current_y) > tolerance:
+            if current_line:
+                lines.append(current_line)
+            current_line = [w["text"]]
+            current_y = y
+        else:
+            current_line.append(w["text"])
+
+    if current_line:
+        lines.append(current_line)
+
+    return "\n".join(" ".join(line) for line in lines)
