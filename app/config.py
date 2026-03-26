@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     )
 
     # --- App ---
-    app_name: str = "RAG PDF Q&A"
+    app_name: str = "DocMind"
     app_version: str = "0.1.0"
     debug: bool = False
     log_level: str = "INFO"

@@ -1,4 +1,4 @@
-# Data Flow — RAG PDF Q&A System
+# Data Flow — DocMind
 
 ---
 

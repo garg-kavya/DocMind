@@ -1,8 +1,8 @@
-# RAG PDF Q&A
+# DocMind
 
-A production-grade Retrieval-Augmented Generation system for answering questions over uploaded PDF documents with conversational memory, source citations, and token-streaming responses.
+A production-grade AI-powered PDF Q&A system with conversational memory, source citations, and token-streaming responses. Upload any PDF and chat with it in real time.
 
-Every answer is grounded exclusively in uploaded PDF content.
+Every answer is grounded exclusively in uploaded PDF content — no hallucinations from the LLM's prior knowledge.
 
 **Live demo:** Deploy your own on [Railway](https://railway.app) using the included `Dockerfile` and `railway.json`.
 
@@ -73,7 +73,7 @@ API Layer
 
 ```bash
 git clone https://github.com/garg-kavya/rag-pdf-qa
-cd "rag-pdf-qa"
+cd rag-pdf-qa
 cp .env.example .env
 # Edit .env and set OPENAI_API_KEY=sk-...
 ```

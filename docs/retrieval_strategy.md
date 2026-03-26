@@ -1,4 +1,4 @@
-# Retrieval Strategy — RAG PDF Q&A System
+# Retrieval Strategy — DocMind
 
 ---
 

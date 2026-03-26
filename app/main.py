@@ -58,7 +58,7 @@ async def lifespan(app: FastAPI):
     yield  # app is running
 
     cleanup_task.cancel()
-    logger.info("RAG PDF Q&A service shutting down")
+    logger.info("DocMind service shutting down")
 
 
 def create_app() -> FastAPI:
@@ -67,7 +67,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.app_name,
         version=settings.app_version,
-        description="Production-grade RAG system for PDF Q&A",
+        description="DocMind — AI-powered PDF Q&A with conversational memory",
         lifespan=lifespan,
     )
 
