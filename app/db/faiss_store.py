@@ -77,9 +77,11 @@ class FAISSStore(VectorStore):
             if self._index.ntotal == 0:
                 return []
 
-            # Over-fetch when filtering by document_ids
-            fetch_k = top_k * 3 if document_ids else top_k
-            fetch_k = min(fetch_k, self._index.ntotal)
+            # When filtering by document_ids, fetch ALL vectors so the
+            # document filter doesn't silently exclude the target doc's chunks
+            # (they may not rank in the global top-K if other docs dominate).
+            fetch_k = self._index.ntotal if document_ids else top_k
+            fetch_k = max(fetch_k, top_k)  # always fetch at least top_k
 
             q = np.array([query_embedding], dtype=np.float32)
             norm = np.linalg.norm(q)
