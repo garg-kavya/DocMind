@@ -41,8 +41,8 @@ class Settings(BaseSettings):
 
     # --- Retrieval ---
     vector_store_type: Literal["faiss", "chroma"] = "chroma"
-    top_k: int = 5
-    top_k_candidates: int = 10
+    top_k: int = 10
+    top_k_candidates: int = 20
     similarity_threshold: float = 0.0
     mmr_diversity_factor: float = 0.7
 

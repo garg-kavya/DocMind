@@ -194,13 +194,10 @@ class RAGPipeline:
         session = await self._sessions.get_session(session_id)
         history = session.conversation_history if session else []
 
-        # Step 3 — reformulation
+        # Step 3 — reformulation (always run to expand inferential queries)
         t0 = time.monotonic()
-        standalone_query = raw_query
-        reformulation_ms = 0.0
-        if history:
-            standalone_query = await self._reformulator.reformulate(raw_query, history)
-            reformulation_ms = (time.monotonic() - t0) * 1000
+        standalone_query = await self._reformulator.reformulate(raw_query, history)
+        reformulation_ms = (time.monotonic() - t0) * 1000
 
         # Step 4 — embedding (via cache)
         t0 = time.monotonic()
