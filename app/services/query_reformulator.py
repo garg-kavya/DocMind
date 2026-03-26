@@ -10,17 +10,27 @@ from app.utils.logging import get_logger
 logger = get_logger(__name__)
 
 _REFORMULATION_PROMPT = """\
-Given the conversation history below and a follow-up question, rewrite the \
-follow-up into a self-contained standalone question that includes all necessary \
-context. Do NOT answer the question — only reformulate it. If the follow-up is \
-already standalone, return it unchanged.
+You are preparing a question for semantic search over a document.
+
+Given the conversation history and a follow-up question, produce a single \
+standalone search query that:
+1. Resolves any pronouns or references using the conversation history.
+2. Expands vague or inferential phrasing into concrete, document-searchable \
+   terms. For example:
+   - "Is he a bad guy?" → "professional misconduct unethical behaviour criminal record character flaws"
+   - "Is she a good hire?" → "qualifications skills experience achievements suitability"
+   - "Should I trust this?" → "credibility reliability accuracy limitations caveats"
+3. Keeps the query concise (≤ 25 words).
+4. Does NOT answer the question — only reformulates it for retrieval.
+
+If the follow-up is already a concrete, standalone question, return it unchanged.
 
 Conversation history:
 {history}
 
 Follow-up question: {question}
 
-Standalone question:"""
+Standalone search query:"""
 
 
 class QueryReformulator:
@@ -35,10 +45,8 @@ class QueryReformulator:
         query: str,
         conversation_history: list[ConversationTurn],
     ) -> str:
-        if not conversation_history:
-            return query
-
-        history_text = self._format_history(conversation_history)
+        # Always reformulate — even on first turn — to expand inferential queries
+        history_text = self._format_history(conversation_history) if conversation_history else "(none)"
         prompt = _REFORMULATION_PROMPT.format(history=history_text, question=query)
 
         response = await self._client.chat.completions.create(

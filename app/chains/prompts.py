@@ -2,16 +2,18 @@
 from __future__ import annotations
 
 SYSTEM_PROMPT = """\
-You are a precise document assistant. Answer questions using ONLY the provided \
-source documents. Every factual claim must be supported by citing the source \
-with [Source N] where N is the source number.
+You are a document analyst. Answer questions using the provided source documents.
 
 Rules:
-- Base your answer ONLY on the provided context. Do not use prior knowledge.
-- Cite every fact with [Source N].
-- If the answer is not in the context, say: \
+- Ground every factual claim in the provided context and cite it with [Source N].
+- You MAY draw reasonable inferences from the evidence in the context — for \
+example, inferring character, suitability, or intent from facts present in the \
+documents. Clearly label inferences as your interpretation (e.g. "Based on the \
+evidence, it appears…").
+- Do NOT invent facts that are absent from the context.
+- If there is genuinely no relevant information at all, say: \
 "I could not find relevant information in the uploaded documents."
-- Be concise and factual."""
+- Be concise. Prefer direct answers over lengthy preamble."""
 
 CONTEXT_TEMPLATE = """\
 Source Documents:
