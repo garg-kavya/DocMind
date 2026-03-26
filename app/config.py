@@ -1,109 +1,93 @@
-"""
-Application Configuration
-==========================
+"""Application configuration via pydantic-settings."""
+from __future__ import annotations
 
-Purpose:
-    Centralized configuration management using Pydantic BaseSettings.
-    All configuration is loaded from environment variables, .env files,
-    and configs/default.yaml with proper validation and type coercion.
+from functools import lru_cache
+from typing import Literal
 
-Configuration Sections:
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-    AppSettings:
-        - APP_NAME: str = "RAG PDF Q&A"
-        - APP_VERSION: str = "0.1.0"
-        - DEBUG: bool = False
-        - LOG_LEVEL: str = "INFO"
-        - UPLOAD_DIR: str = "./uploads"
-        - MAX_UPLOAD_SIZE_MB: int = 50
 
-    OpenAISettings:
-        - OPENAI_API_KEY: str (required, secret)
-        - EMBEDDING_MODEL: str = "text-embedding-3-small"
-        - EMBEDDING_DIMENSIONS: int = 1536
-        - EMBEDDING_BATCH_SIZE: int = 100
-        - LLM_MODEL: str = "gpt-4o"
-        - LLM_TEMPERATURE: float = 0.1
-        - LLM_MAX_TOKENS: int = 1024
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
 
-    ChunkingSettings:
-        - CHUNK_SIZE_TOKENS: int = 512
-            Justification: 512 tokens balances precision and context.
-            256 is too granular (loses surrounding context, noisy retrieval).
-            1024 is too broad (dilutes relevance, wastes LLM context window).
-            512 allows ~5 chunks to fit in a 4K context budget with room
-            for the prompt, history, and generated answer.
-        - CHUNK_OVERLAP_TOKENS: int = 64
-            12.5% overlap preserves cross-boundary information without
-            excessive duplication in the vector store.
-        - SPLIT_SEPARATORS: list[str] = ["\\n\\n", "\\n", ". ", " "]
-            Hierarchical splitting: paragraphs > lines > sentences > words.
+    # --- App ---
+    app_name: str = "RAG PDF Q&A"
+    app_version: str = "0.1.0"
+    debug: bool = False
+    log_level: str = "INFO"
+    upload_dir: str = "./uploads"
+    max_upload_size_mb: int = 50
+    vector_store_path: str = "./data"
 
-    RetrievalSettings:
-        - VECTOR_STORE_TYPE: str = "faiss"  # "faiss" | "chroma"
-        - TOP_K: int = 5
-            Final number of chunks passed to the LLM after MMR selection.
-        - TOP_K_CANDIDATES: int = 10
-            Over-fetch factor: 2x top_k fetched before reranking/MMR.
-            Provides enough candidates for the reranker to meaningfully
-            reorder before MMR trims to final top_k.
-        - SIMILARITY_THRESHOLD: float = 0.70
-        - MMR_DIVERSITY_FACTOR: float = 0.3
-            λ in MMR formula: higher = more relevance weight, less diversity.
+    # --- OpenAI ---
+    openai_api_key: str = Field(..., alias="OPENAI_API_KEY")
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimensions: int = 1536
+    embedding_batch_size: int = 100
+    llm_model: str = "gpt-4o"
+    llm_temperature: float = 0.1
+    llm_max_tokens: int = 1024
 
-    RerankerSettings:
-        - RERANKER_BACKEND: str = "none"
-            One of: "none" | "cross_encoder" | "cohere"
-            "none"          → disabled; MMR-only ordering.
-            "cross_encoder" → local sentence-transformers model; no API cost.
-            "cohere"        → Cohere Rerank API; higher quality, external call.
-        - COHERE_API_KEY: str | None = None
-            Required when RERANKER_BACKEND == "cohere". Loaded as a secret.
-        - CROSS_ENCODER_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-            Sentence-transformers model name for local cross-encoder reranking.
-            ~70MB download on first use. Cached locally by sentence-transformers.
+    # --- Chunking ---
+    chunk_size_tokens: int = 512
+    chunk_overlap_tokens: int = 64
+    split_separators: list[str] = ["\n\n", "\n", ". ", " "]
 
-    CacheSettings:
-        - CACHE_BACKEND: str = "memory"
-            Currently only "memory" is supported. Future: "redis".
-        - CACHE_MAX_SIZE: int = 1000
-            Max entries in the LRU in-memory cache before eviction.
-        - EMBEDDING_CACHE_TTL_SECONDS: int = 86400
-            24 hours. Embeddings are deterministic for a given model version.
-        - RESPONSE_CACHE_TTL_SECONDS: int = 60
-            60 seconds. Prevents double-submission; short because history changes.
+    # --- Retrieval ---
+    vector_store_type: Literal["faiss", "chroma"] = "faiss"
+    top_k: int = 5
+    top_k_candidates: int = 10
+    similarity_threshold: float = 0.70
+    mmr_diversity_factor: float = 0.7
 
-    MemorySettings:
-        - MEMORY_TOKEN_BUDGET: int = 1024
-            Max tokens allocated to conversation history in each prompt.
-            ContextBuilder trims oldest turns to stay within this budget.
-        - COMPRESSION_THRESHOLD: int = 10
-            Number of turns at which MemoryCompressor is triggered.
-            Equals MAX_CONVERSATION_TURNS by default so compression fires
-            before any turns are dropped.
-        - COMPRESSION_TURNS: int = 5
-            Number of oldest turns to compress into a summary at once.
+    # --- Reranker ---
+    reranker_backend: Literal["none", "cross_encoder", "cohere"] = "none"
+    cohere_api_key: str | None = None
+    cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
-    SessionSettings:
-        - SESSION_TTL_MINUTES: int = 60
-        - MAX_CONVERSATION_TURNS: int = 10
-        - SESSION_CLEANUP_INTERVAL_SECONDS: int = 300
+    # --- Cache ---
+    cache_backend: str = "memory"
+    cache_max_size: int = 1000
+    embedding_cache_ttl_seconds: int = 86400
+    response_cache_ttl_seconds: int = 60
 
-    ServerSettings:
-        - HOST: str = "0.0.0.0"
-        - PORT: int = 8000
-        - WORKERS: int = 1
-        - CORS_ORIGINS: list[str] = ["*"]
+    # --- Memory ---
+    memory_token_budget: int = 1024
+    compression_threshold: int = 10
+    compression_turns: int = 5
 
-Inputs:
-    - Environment variables (highest priority)
-    - .env file in project root
-    - configs/default.yaml (lowest priority, base defaults)
+    # --- Sessions ---
+    session_ttl_minutes: int = 60
+    max_conversation_turns: int = 10
+    session_cleanup_interval_seconds: int = 300
 
-Outputs:
-    - Validated Settings singleton accessible via get_settings()
+    # --- Server ---
+    host: str = "0.0.0.0"
+    port: int = 8000
+    workers: int = 1
+    cors_origins: list[str] = ["*"]
 
-Dependencies:
-    - pydantic-settings
-    - pyyaml
-"""
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors(cls, v: object) -> list[str]:
+        if isinstance(v, str):
+            return [o.strip() for o in v.split(",")]
+        return v  # type: ignore[return-value]
+
+    @field_validator("split_separators", mode="before")
+    @classmethod
+    def parse_separators(cls, v: object) -> list[str]:
+        if isinstance(v, str):
+            return v.split(",")
+        return v  # type: ignore[return-value]
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()  # type: ignore[call-arg]

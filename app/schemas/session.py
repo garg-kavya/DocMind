@@ -1,57 +1,44 @@
-"""
-Session API Schemas
-====================
+"""Session API schemas."""
+from __future__ import annotations
 
-Purpose:
-    Pydantic models for session management endpoints.
-    Used by POST /api/v1/sessions, GET /api/v1/sessions/{session_id},
-    and DELETE /api/v1/sessions/{session_id}.
+from datetime import datetime
 
-Schemas:
+from pydantic import BaseModel
 
-    SessionCreateRequest:
-        Fields:
-            document_ids: list[str] | None - optional list of document IDs
-                to pre-load into the session. Documents can also be added
-                later via upload with session_id.
-            config_overrides: dict | None - optional per-session config
-                (e.g., {"top_k": 7, "chunk_size_tokens": 256})
 
-    SessionCreateResponse:
-        Fields:
-            session_id: str - UUID of the new session
-            document_ids: list[str] - documents loaded in this session
-            created_at: datetime
-            expires_at: datetime - when session will auto-expire
-            message: str
+class SessionCreateRequest(BaseModel):
+    document_ids: list[str] | None = None
+    config_overrides: dict | None = None
 
-    ConversationTurnSchema:
-        Fields:
-            turn_index: int - 0-based position in conversation
-            user_query: str - original question
-            standalone_query: str - reformulated standalone version
-            assistant_response: str - generated answer
-            citations: list[CitationSchema] - sources for this turn
-            timestamp: datetime
 
-    SessionDetailResponse:
-        Fields:
-            session_id: str
-            document_ids: list[str]
-            conversation_history: list[ConversationTurnSchema]
-            turn_count: int
-            created_at: datetime
-            last_active_at: datetime
-            expires_at: datetime
+class SessionCreateResponse(BaseModel):
+    session_id: str
+    document_ids: list[str]
+    created_at: datetime
+    expires_at: datetime
+    message: str
 
-    SessionDeleteResponse:
-        Fields:
-            session_id: str
-            message: str
-            turns_cleared: int
 
-Dependencies:
-    - pydantic (BaseModel, Field)
-    - datetime
-    - app.schemas.query (CitationSchema)
-"""
+class ConversationTurnSchema(BaseModel):
+    turn_index: int
+    user_query: str
+    standalone_query: str
+    assistant_response: str
+    citations: list[dict] = []
+    timestamp: datetime
+
+
+class SessionDetailResponse(BaseModel):
+    session_id: str
+    document_ids: list[str]
+    conversation_history: list[ConversationTurnSchema]
+    turn_count: int
+    created_at: datetime
+    last_active_at: datetime
+    expires_at: datetime
+
+
+class SessionDeleteResponse(BaseModel):
+    session_id: str
+    message: str
+    turns_cleared: int

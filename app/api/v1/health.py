@@ -1,41 +1,55 @@
-"""
-Health Check Endpoint
-======================
+"""Health check endpoint."""
+from __future__ import annotations
 
-Purpose:
-    Provides service health and readiness information for monitoring,
-    load balancers, and container orchestration (Docker/K8s).
+import time
 
-Endpoints:
+from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
 
-    GET /api/v1/health
-        Returns the overall health status of the service.
+from app.db.document_registry import DocumentRegistry
+from app.db.session_store import SessionStore
+from app.db.vector_store import VectorStore
+from app.dependencies import get_document_registry, get_session_store, get_settings, get_vector_store
 
-        Response: 200 OK
-            {
-                "status": "healthy",
-                "version": "0.1.0",
-                "checks": {
-                    "vector_store": "ok" | "error",
-                    "openai_api": "ok" | "error",
-                    "upload_dir": "ok" | "error"
-                },
-                "uptime_seconds": float,
-                "active_sessions": int,
-                "total_documents": int,
-                "total_vectors": int
-            }
+router = APIRouter(tags=["health"])
+_START_TIME = time.monotonic()
 
-        Response: 503 Service Unavailable (if any critical check fails)
-            Same schema with status="unhealthy"
 
-    Health Checks Performed:
-        - vector_store: Can the vector DB be reached and queried?
-        - openai_api: Is the API key valid? (cached check, refreshed every 60s)
-        - upload_dir: Does the upload directory exist and is it writable?
+@router.get("/health")
+async def health(
+    vector_store: VectorStore = Depends(get_vector_store),
+    registry: DocumentRegistry = Depends(get_document_registry),
+    session_store: SessionStore = Depends(get_session_store),
+    settings=Depends(get_settings),
+):
+    checks: dict[str, str] = {}
 
-Dependencies:
-    - fastapi (APIRouter, Depends)
-    - app.dependencies (get_vector_store, get_settings)
-    - time (for uptime tracking)
-"""
+    # Vector store check
+    try:
+        stats = await vector_store.get_collection_stats()
+        checks["vector_store"] = "ok"
+    except Exception:
+        stats = {"total_vectors": 0, "total_documents": 0}
+        checks["vector_store"] = "error"
+
+    # Upload dir check
+    import os
+    checks["upload_dir"] = "ok" if os.path.isdir(settings.upload_dir) else "error"
+
+    all_docs = await registry.get_all()
+    all_sessions = await session_store.cleanup_expired()  # returns count removed
+
+    status = "healthy" if all(v == "ok" for v in checks.values()) else "unhealthy"
+    http_status = 200 if status == "healthy" else 503
+
+    return JSONResponse(
+        status_code=http_status,
+        content={
+            "status": status,
+            "version": settings.app_version,
+            "checks": checks,
+            "uptime_seconds": round(time.monotonic() - _START_TIME, 1),
+            "total_documents": len(all_docs),
+            "total_vectors": stats.get("total_vectors", 0),
+        },
+    )

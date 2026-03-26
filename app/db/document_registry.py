@@ -1,97 +1,163 @@
-"""
-Document Registry
-==================
+"""Document registry with in-memory state and JSON persistence."""
+from __future__ import annotations
 
-Purpose:
-    Manages the in-process registry of all uploaded documents, tracking
-    their processing status, PDF metadata, and ingestion results.
+import asyncio
+import json
+import os
+from datetime import datetime
 
-    This module fills a gap that was previously undeclared: the API handlers
-    and ingestion pipeline needed somewhere to read/write document status
-    and metadata without coupling to the vector store. The vector store
-    owns chunk vectors; the DocumentRegistry owns document-level state.
+from app.exceptions import DocumentNotFoundError
+from app.models.document import Document
+from app.schemas.metadata import IngestionMetadata, PDFMetadata
+from app.utils.logging import get_logger
 
-Relationship to Vector Store:
-    ┌──────────────────────┐        ┌──────────────────────────┐
-    │  DocumentRegistry    │        │  VectorStore             │
-    │  (document-level)    │        │  (chunk-level)           │
-    │                      │        │                          │
-    │  document_id → {     │        │  chunk vectors +         │
-    │    filename,         │        │  ChunkMetadata           │
-    │    status,           │        │  (keyed by document_id   │
-    │    page_count,       │        │   for scoped retrieval)  │
-    │    pdf_metadata,     │        │                          │
-    │    ingestion_meta    │        │                          │
-    │  }                   │        │                          │
-    └──────────────────────┘        └──────────────────────────┘
+logger = get_logger(__name__)
 
-Storage Model:
-    dict[str, Document] — document_id → Document domain object.
 
-    In-memory by design: document metadata is small (~1KB per document),
-    access is frequent (every query validates document_ids), and
-    persistence is optional (reconstructable from vector store on restart).
+class DocumentRegistry:
 
-Methods:
+    def __init__(self, persist_path: str | None = None) -> None:
+        self._docs: dict[str, Document] = {}
+        self._lock = asyncio.Lock()
+        self._persist_path = persist_path
 
-    register(
+    async def register(
+        self,
         document_id: str,
         filename: str,
         file_path: str,
-        file_size_bytes: int
+        file_size_bytes: int,
     ) -> Document:
-        Creates a new Document record with status="uploaded".
-        Called by the documents API handler immediately after file save.
-        Inputs: upload file metadata
-        Outputs: Document domain object
+        doc = Document(
+            document_id=document_id,
+            filename=filename,
+            file_path=file_path,
+            file_size_bytes=file_size_bytes,
+            status="uploaded",
+        )
+        async with self._lock:
+            self._docs[document_id] = doc
+        return doc
 
-    update_status(
+    async def update_status(
+        self,
         document_id: str,
         status: str,
-        error_message: str | None = None
+        error_message: str | None = None,
     ) -> None:
-        Updates the processing status of a document.
-        Valid transitions:
-            "uploaded" → "processing"
-            "processing" → "ready"
-            "processing" → "error"
-        Sets processed_at timestamp when transitioning to "ready" or "error".
+        async with self._lock:
+            doc = self._docs.get(document_id)
+            if doc is None:
+                return
+            doc.status = status
+            doc.error_message = error_message
+            if status in ("ready", "error"):
+                doc.processed_at = datetime.utcnow()
 
-    set_ingestion_metadata(
+    async def set_ingestion_metadata(
+        self,
         document_id: str,
         pdf_metadata: PDFMetadata,
-        ingestion_metadata: IngestionMetadata
+        ingestion_metadata: IngestionMetadata,
     ) -> None:
-        Attaches the parsed PDF metadata and ingestion summary to the
-        document record. Called by IngestionPipeline on successful completion.
+        async with self._lock:
+            doc = self._docs.get(document_id)
+            if doc is None:
+                return
+            doc.pdf_metadata = pdf_metadata
+            doc.ingestion_metadata = ingestion_metadata
+            doc.page_count = pdf_metadata.page_count
+            doc.total_chunks = ingestion_metadata.total_chunks
+        await self.save_to_disk()
 
-    get(document_id: str) -> Document | None:
-        Retrieve a document by ID. Returns None if not found.
+    async def get(self, document_id: str) -> Document | None:
+        async with self._lock:
+            return self._docs.get(document_id)
 
-    get_all(status: str | None = None) -> list[Document]:
-        Return all documents, optionally filtered by status.
-        Used by GET /api/v1/documents list endpoint.
+    async def get_all(self, status: str | None = None) -> list[Document]:
+        async with self._lock:
+            docs = list(self._docs.values())
+        if status:
+            docs = [d for d in docs if d.status == status]
+        return docs
 
-    delete(document_id: str) -> bool:
-        Remove a document record. Returns True if found and deleted.
-        Called after VectorStore.delete_document() succeeds.
+    async def delete(self, document_id: str) -> bool:
+        async with self._lock:
+            removed = self._docs.pop(document_id, None) is not None
+        if removed:
+            await self.save_to_disk()
+        return removed
 
-    exists(document_id: str) -> bool:
-        Fast existence check without returning the full object.
+    async def exists(self, document_id: str) -> bool:
+        async with self._lock:
+            return document_id in self._docs
 
-Thread Safety:
-    Uses asyncio.Lock for concurrent access safety (same pattern as
-    SessionStore).
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
 
-Persistence (optional, future):
-    For production deployments that need registry persistence across
-    restarts, this can be backed by a SQLite or PostgreSQL table via
-    SQLAlchemy. The interface above remains unchanged; only the
-    storage implementation changes.
+    async def save_to_disk(self) -> None:
+        if not self._persist_path:
+            return
+        os.makedirs(os.path.dirname(self._persist_path), exist_ok=True)
+        async with self._lock:
+            data = {did: self._doc_to_dict(d) for did, d in self._docs.items()}
+        try:
+            with open(self._persist_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as exc:
+            logger.warning("Failed to save registry to disk: %s", exc)
 
-Dependencies:
-    - asyncio
-    - app.models.document (Document)
-    - app.schemas.metadata (PDFMetadata, IngestionMetadata)
-    - app.exceptions (DocumentNotFoundError)
-"""
+    async def load_from_disk(self) -> None:
+        if not self._persist_path or not os.path.exists(self._persist_path):
+            return
+        try:
+            with open(self._persist_path, encoding="utf-8") as f:
+                data = json.load(f)
+            async with self._lock:
+                for did, d in data.items():
+                    try:
+                        self._docs[did] = self._dict_to_doc(d)
+                    except Exception:
+                        pass
+            logger.info("Loaded %d documents from registry on disk", len(data))
+        except Exception as exc:
+            logger.warning("Failed to load registry from disk: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Serialization helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _doc_to_dict(doc: Document) -> dict:
+        return {
+            "document_id": doc.document_id,
+            "filename": doc.filename,
+            "file_path": doc.file_path,
+            "file_size_bytes": doc.file_size_bytes,
+            "status": doc.status,
+            "page_count": doc.page_count,
+            "total_chunks": doc.total_chunks,
+            "created_at": doc.created_at.isoformat(),
+            "processed_at": doc.processed_at.isoformat() if doc.processed_at else None,
+            "error_message": doc.error_message,
+            "pdf_metadata": doc.pdf_metadata.model_dump() if doc.pdf_metadata else None,
+            "ingestion_metadata": doc.ingestion_metadata.model_dump() if doc.ingestion_metadata else None,
+        }
+
+    @staticmethod
+    def _dict_to_doc(d: dict) -> Document:
+        doc = Document.__new__(Document)
+        doc.document_id = d["document_id"]
+        doc.filename = d["filename"]
+        doc.file_path = d["file_path"]
+        doc.file_size_bytes = d["file_size_bytes"]
+        doc.status = d["status"]
+        doc.page_count = d.get("page_count", 0)
+        doc.total_chunks = d.get("total_chunks", 0)
+        doc.created_at = datetime.fromisoformat(d["created_at"])
+        doc.processed_at = datetime.fromisoformat(d["processed_at"]) if d.get("processed_at") else None
+        doc.error_message = d.get("error_message")
+        doc.pdf_metadata = PDFMetadata(**d["pdf_metadata"]) if d.get("pdf_metadata") else None
+        doc.ingestion_metadata = IngestionMetadata(**d["ingestion_metadata"]) if d.get("ingestion_metadata") else None
+        return doc

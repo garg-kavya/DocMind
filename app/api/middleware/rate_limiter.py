@@ -1,33 +1,60 @@
-"""
-Rate Limiting Middleware
-=========================
+"""Token-bucket rate limiting middleware."""
+from __future__ import annotations
 
-Purpose:
-    Prevents API abuse by limiting request rates per client IP.
-    Particularly important for the query endpoints which trigger
-    OpenAI API calls (and thus cost money).
+import time
+from collections import defaultdict
 
-Strategy:
-    Token bucket algorithm per client IP:
-    - Upload endpoint: 10 requests/minute
-    - Query endpoint: 30 requests/minute
-    - Session endpoints: 60 requests/minute
-    - Health endpoint: unlimited
+from fastapi import Request
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
-Response on Rate Limit:
-    429 Too Many Requests
-    {
-        "detail": "Rate limit exceeded. Try again in {retry_after} seconds.",
-        "retry_after": int
-    }
-    Headers:
-        X-RateLimit-Limit: max requests per window
-        X-RateLimit-Remaining: requests remaining
-        X-RateLimit-Reset: epoch seconds when the window resets
-        Retry-After: seconds until next request allowed
+# requests per minute per client IP by path prefix
+_LIMITS: dict[str, int] = {
+    "/api/v1/documents": 10,
+    "/api/v1/query": 30,
+    "/api/v1/sessions": 60,
+}
+_WINDOW = 60  # seconds
 
-Dependencies:
-    - fastapi (Request, Response)
-    - time (stdlib)
-    - collections (stdlib) — for token bucket state
-"""
+
+class RateLimiterMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app) -> None:
+        super().__init__(app)
+        # {(client_ip, path_prefix): [timestamps]}
+        self._buckets: dict[tuple, list[float]] = defaultdict(list)
+
+    async def dispatch(self, request: Request, call_next):
+        client_ip = request.client.host if request.client else "unknown"
+        path = request.url.path
+
+        limit = None
+        prefix = ""
+        for p, l in _LIMITS.items():
+            if path.startswith(p):
+                limit = l
+                prefix = p
+                break
+
+        if limit is None:
+            return await call_next(request)
+
+        key = (client_ip, prefix)
+        now = time.monotonic()
+
+        # Slide window
+        timestamps = [t for t in self._buckets[key] if now - t < _WINDOW]
+        if len(timestamps) >= limit:
+            retry_after = int(_WINDOW - (now - timestamps[0])) + 1
+            return JSONResponse(
+                status_code=429,
+                content={"detail": f"Rate limit exceeded. Try again in {retry_after}s."},
+                headers={
+                    "Retry-After": str(retry_after),
+                    "X-RateLimit-Limit": str(limit),
+                    "X-RateLimit-Remaining": "0",
+                },
+            )
+
+        timestamps.append(now)
+        self._buckets[key] = timestamps
+        return await call_next(request)

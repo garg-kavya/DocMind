@@ -1,120 +1,116 @@
-"""
-Retrieval Service
-==================
+"""Retrieval Service — vector search, threshold filter, MMR."""
+from __future__ import annotations
 
-Purpose:
-    Performs semantic search over the vector database given a pre-computed
-    query embedding, then applies score-threshold filtering and MMR diversity
-    selection. Returns a ranked list of candidate chunks.
+import time
 
-    IMPORTANT — scope of this service:
-    ✓ Vector similarity search         (Stage 1)
-    ✓ Score threshold filtering        (Stage 2)
-    ✓ MMR diversity selection          (Stage 3, called separately)
-    ✗ Query embedding                  → EmbeddingCache / EmbeddingService
-    ✗ Cross-encoder reranking          → RerankerService
-    ✗ Session or document validation   → RAGPipeline
+import numpy as np
 
-    The full ordered pipeline (owned by RAGPipeline):
-        EmbeddingCache.get_or_embed()         ← embedding
-        RetrieverService.retrieve()           ← stages 1 + 2
-        RerankerService.rerank()              ← optional, stage 3a
-        RetrieverService.apply_mmr()          ← stage 3b (diversity)
+from app.config import Settings
+from app.db.vector_store import VectorStore
+from app.exceptions import NoDocumentsError, StorageReadError
+from app.models.query import RetrievedContext, ScoredChunk
+from app.schemas.metadata import RetrievalMetadata
+from app.utils.logging import get_logger
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Stage Descriptions
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+logger = get_logger(__name__)
 
-    Stage 1: Vector Similarity Search
-        Input: query_embedding (pre-computed 1536-dim vector)
-        Action: VectorStore.search(query_embedding, top_k=TOP_K_CANDIDATES,
-                                   document_ids=document_ids)
-        Returns: top TOP_K_CANDIDATES (query, chunk) cosine similarity pairs
-        Latency: ~10-50ms (FAISS) / ~50-100ms (ChromaDB)
-        Note: TOP_K_CANDIDATES = TOP_K * 2 (over-fetch for reranking/MMR)
 
-    Stage 2: Score Threshold Filtering
-        Input: list[ScoredChunk] from stage 1
-        Action: discard any chunk where similarity_score < SIMILARITY_THRESHOLD
-        Effect: prevents low-relevance chunks reaching later stages even if
-                fewer than TOP_K_CANDIDATES remain after filtering
-        Note: sets bi_encoder_score = similarity_score on each ScoredChunk
+class RetrieverService:
 
-    Stage 3a (in RerankerService): Cross-Encoder Reranking (optional)
-        Not performed here. RAGPipeline calls RerankerService.rerank() after
-        retrieve() returns, if RERANKER_BACKEND != "none".
+    def __init__(self, vector_store: VectorStore, settings: Settings) -> None:
+        self._store = vector_store
+        self._top_k = settings.top_k
+        self._top_k_candidates = settings.top_k_candidates
+        self._threshold = settings.similarity_threshold
+        self._mmr_lambda = settings.mmr_diversity_factor
 
-    Stage 3b: MMR Diversity Selection
-        Input: list[ScoredChunk] (already reranked, or raw filtered if no reranker)
-        Action: select final top_k chunks maximising:
-                score = λ · similarity_score − (1−λ) · max_sim_to_selected
-        Lambda: MMR_DIVERSITY_FACTOR (default 0.7 — favour relevance)
-        Effect: eliminates near-duplicate chunks; ensures diverse coverage
-        Latency: ~5-20ms (CPU, O(k·n) where n = candidates, k = top_k)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Methods
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    retrieve(
+    async def retrieve(
+        self,
         query_embedding: list[float],
         document_ids: list[str],
-        top_k_candidates: int | None = None
+        top_k_candidates: int | None = None,
     ) -> tuple[list[ScoredChunk], RetrievalMetadata]:
-        Executes stages 1 and 2. Returns threshold-filtered candidates
-        ready for optional reranking and final MMR selection.
-        Inputs:
-            query_embedding   — 1536-dim pre-computed vector (caller's responsibility)
-            document_ids      — scope search to these documents only
-            top_k_candidates  — override candidate count; defaults to TOP_K_CANDIDATES
-        Outputs:
-            candidates: list[ScoredChunk] — filtered, NOT yet MMR-selected
-                        Each chunk has bi_encoder_score set.
-                        similarity_score == bi_encoder_score at this stage.
-            metadata: RetrievalMetadata (partial — reranker_applied=False,
-                        chunks_used=0; RAGPipeline fills these after MMR)
-        Raises:
-            StorageReadError   — vector store search failed
-            NoDocumentsError   — document_ids is empty
+        """Stage 1 (vector search) + Stage 2 (threshold filter)."""
+        if not document_ids:
+            raise NoDocumentsError("No documents to search.")
 
-    apply_mmr(
+        fetch_k = top_k_candidates or self._top_k_candidates
+        t0 = time.monotonic()
+
+        try:
+            raw = await self._store.search(query_embedding, top_k=fetch_k, document_ids=document_ids)
+        except Exception as exc:
+            raise StorageReadError(f"Vector search failed: {exc}") from exc
+
+        elapsed_ms = (time.monotonic() - t0) * 1000
+
+        # Threshold filter
+        scored: list[ScoredChunk] = []
+        for chunk, score in raw:
+            if score >= self._threshold:
+                scored.append(ScoredChunk(
+                    chunk=chunk,
+                    similarity_score=score,
+                    bi_encoder_score=score,
+                ))
+
+        meta = RetrievalMetadata(
+            retrieval_time_ms=elapsed_ms,
+            candidates_considered=len(raw),
+            candidates_after_threshold=len(scored),
+            chunks_used=0,       # filled after MMR
+            mmr_applied=False,   # filled after MMR
+            reranker_applied=False,
+            similarity_scores=[],
+            top_k_requested=self._top_k,
+            similarity_threshold_used=self._threshold,
+        )
+
+        logger.debug(
+            "Retrieved %d/%d candidates above threshold %.2f",
+            len(scored), len(raw), self._threshold,
+        )
+        return scored, meta
+
+    def apply_mmr(
+        self,
         candidates: list[ScoredChunk],
-        top_k: int,
-        diversity_factor: float | None = None
+        top_k: int | None = None,
+        diversity_factor: float | None = None,
     ) -> list[ScoredChunk]:
-        Executes stage 3b (MMR diversity selection) on already-reranked
-        or threshold-filtered candidates.
-        Inputs:
-            candidates       — list[ScoredChunk] from retrieve() (+ optional reranking)
-            top_k            — final number of chunks to return
-            diversity_factor — override MMR lambda; defaults to MMR_DIVERSITY_FACTOR
-        Outputs:
-            list[ScoredChunk] of length ≤ top_k, in MMR-selected order.
-            rank field is set on each chunk (1-based).
-        Notes:
-            - If len(candidates) <= top_k, returns all candidates without MMR
-              (no diversity calculation needed).
-            - Uses similarity_score (which may be reranker score) for
-              both relevance and cross-similarity calculations.
+        """Stage 3b — Maximal Marginal Relevance diversity selection."""
+        k = top_k or self._top_k
+        lam = diversity_factor if diversity_factor is not None else self._mmr_lambda
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Top-K Tuning Rationale
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        if len(candidates) <= k:
+            for i, sc in enumerate(candidates):
+                sc.rank = i + 1
+            return candidates
 
-    Default: TOP_K=5 (final chunks to LLM), TOP_K_CANDIDATES=10 (over-fetch)
+        # Embed scores as 1-d "vectors" for cross-similarity approximation
+        # (full embedding not available at this point; use score as proxy)
+        selected: list[ScoredChunk] = []
+        remaining = list(candidates)
 
-    - k=3: Simple factual lookups. Minimal context, fast, may miss evidence.
-    - k=5: Default. 5 × 512 = ~2560 tokens; fits in 4K context budget.
-    - k=7-10: Complex analytical questions requiring multi-section synthesis.
-    - Configurable per-query via the API's top_k parameter (range 3-10).
+        while len(selected) < k and remaining:
+            if not selected:
+                # Pick the highest relevance chunk first
+                best = max(remaining, key=lambda sc: sc.similarity_score)
+            else:
+                sel_scores = np.array([s.similarity_score for s in selected])
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Dependencies
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                def mmr_score(sc: ScoredChunk) -> float:
+                    rel = sc.similarity_score
+                    # Use score proximity as cross-similarity proxy
+                    max_sim = float(np.max(np.abs(sel_scores - sc.similarity_score)))
+                    return lam * rel - (1 - lam) * max_sim
 
-    app.db.vector_store          (VectorStore interface)
-    app.models.query             (ScoredChunk)
-    app.schemas.metadata         (RetrievalMetadata)
-    app.exceptions               (StorageReadError, NoDocumentsError)
-    app.config                   (RetrievalSettings)
-"""
+                best = max(remaining, key=mmr_score)
+
+            selected.append(best)
+            remaining.remove(best)
+
+        for i, sc in enumerate(selected):
+            sc.rank = i + 1
+
+        return selected

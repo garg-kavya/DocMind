@@ -1,61 +1,66 @@
-"""
-Embedding Service
-==================
+"""Embedding Service — generate OpenAI vector embeddings."""
+from __future__ import annotations
 
-Purpose:
-    Generates vector embeddings for text chunks and queries using the
-    OpenAI Embeddings API. Embeddings are the numeric representation that
-    enables semantic similarity search in the vector database.
+import asyncio
 
-Pipeline Position:
-    Ingestion: Upload -> Parse -> Clean -> Chunk -> **Embed** -> Store
-    Query:     User Question -> Reformulate -> **Embed** -> Retrieve -> Generate
+from openai import AsyncOpenAI
 
-Embedding Model:
-    text-embedding-3-small (OpenAI)
-    - Dimensions: 1536
-    - Normalized output: vectors have unit L2 norm
-    - Cost-effective for production use
-    - Strong performance on retrieval benchmarks
-    - Alternative: text-embedding-3-large (3072 dims) for higher precision
-      at 2x cost — configurable via settings
+from app.config import Settings
+from app.exceptions import EmbeddingAPIError, EmbeddingTimeoutError
+from app.models.chunk import Chunk
+from app.utils.logging import get_logger
 
-Batch Processing:
-    Document ingestion embeds all chunks in batches:
-    - Batch size: 100 chunks per API call (configurable)
-    - Async batching: concurrent batch calls for large documents
-    - Rate limit handling: exponential backoff on 429 responses
+logger = get_logger(__name__)
 
-    Query embedding is a single API call (~100-150ms latency).
 
-Methods:
+class EmbedderService:
+    """Generate embeddings via the OpenAI Embeddings API."""
 
-    embed_chunks(chunks: list[Chunk]) -> list[Chunk]:
-        Embeds all chunks in batches. Populates the chunk.embedding field.
-        Inputs: list of Chunk objects with text populated
-        Outputs: same chunks with embedding field filled
-        Side effects: OpenAI API calls
+    def __init__(self, settings: Settings) -> None:
+        self._client = AsyncOpenAI(api_key=settings.openai_api_key)
+        self._model = settings.embedding_model
+        self._batch_size = settings.embedding_batch_size
+        self._dimensions = settings.embedding_dimensions
 
-    embed_query(query_text: str) -> list[float]:
-        Embeds a single query string.
-        Inputs: query text (standalone, reformulated query)
-        Outputs: 1536-dimensional embedding vector
-        Latency: ~100-150ms
+    async def embed_chunks(self, chunks: list[Chunk]) -> list[Chunk]:
+        """Batch-embed all chunks and populate chunk.embedding in-place."""
+        if not chunks:
+            return chunks
 
-Performance Considerations:
-    - Batch embedding at ingestion time means zero embedding latency for
-      stored documents at query time
-    - Query embedding is the only per-request embedding call (~100ms)
-    - Connection pooling via httpx.AsyncClient for OpenAI API
-    - Embedding cache (LRU) for repeated identical queries (optional)
+        batches = [
+            chunks[i : i + self._batch_size]
+            for i in range(0, len(chunks), self._batch_size)
+        ]
 
-Error Handling:
-    - API timeout: retry with exponential backoff (max 3 retries)
-    - Rate limit (429): backoff and retry
-    - Invalid input: raise EmbeddingError with details
+        for batch in batches:
+            texts = [c.text for c in batch]
+            vectors = await self._embed_texts(texts)
+            for chunk, vector in zip(batch, vectors):
+                chunk.embedding = vector
 
-Dependencies:
-    - openai (AsyncOpenAI client)
-    - app.models.chunk (Chunk)
-    - app.config (OpenAISettings)
-"""
+        logger.info("Embedded %d chunks", len(chunks))
+        return chunks
+
+    async def embed_query(self, query_text: str) -> list[float]:
+        """Embed a single query string. Called only by EmbeddingCache on miss."""
+        vectors = await self._embed_texts([query_text])
+        return vectors[0]
+
+    async def _embed_texts(self, texts: list[str]) -> list[list[float]]:
+        """Call the OpenAI Embeddings API with retry on timeout."""
+        for attempt in range(3):
+            try:
+                response = await self._client.embeddings.create(
+                    model=self._model,
+                    input=texts,
+                )
+                return [item.embedding for item in response.data]
+            except asyncio.TimeoutError as exc:
+                if attempt == 2:
+                    raise EmbeddingTimeoutError("Embedding API timed out.") from exc
+                await asyncio.sleep(2 ** attempt)
+            except Exception as exc:
+                raise EmbeddingAPIError(
+                    f"Embedding API error: {exc}", detail=str(exc)
+                ) from exc
+        raise EmbeddingAPIError("Embedding failed after retries.")

@@ -1,0 +1,21 @@
+# Core application dependencies
+# Generated from installed versions — do not add dev tools here
+
+fastapi==0.135.2
+uvicorn[standard]==0.42.0
+openai==2.29.0
+faiss-cpu==1.13.2
+PyMuPDF==1.27.2.2
+pdfplumber==0.11.9
+tiktoken==0.12.0
+pydantic==2.12.5
+pydantic-settings==2.13.1
+python-multipart==0.0.22
+numpy==2.4.3
+aiofiles==25.1.0
+httpx==0.28.1
+
+# Optional — only loaded when enabled via env vars
+# RERANKER_BACKEND=cohere   → cohere
+# RERANKER_BACKEND=cross_encoder → sentence-transformers
+# VECTOR_STORE_TYPE=chroma  → chromadb

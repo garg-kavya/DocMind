@@ -1,42 +1,102 @@
-"""
-Global Error Handler Middleware
-================================
+"""Global error handler middleware."""
+from __future__ import annotations
 
-Purpose:
-    Catches unhandled exceptions and converts them into structured JSON
-    error responses. Prevents stack traces from leaking to clients in
-    production while providing useful error details in debug mode.
+import traceback
+import uuid
 
-Error Categories and HTTP Status Codes:
+from fastapi import Request
+from fastapi.responses import JSONResponse
 
-    PDFParsingError         -> 422 Unprocessable Entity
-    EmbeddingError          -> 502 Bad Gateway (upstream API failure)
-    VectorStoreError        -> 500 Internal Server Error
-    SessionNotFoundError    -> 404 Not Found
-    SessionExpiredError     -> 410 Gone
-    DocumentNotFoundError   -> 404 Not Found
-    ValidationError         -> 400 Bad Request (Pydantic)
-    RateLimitError          -> 429 Too Many Requests
-    Exception (unhandled)   -> 500 Internal Server Error
+from app.exceptions import (
+    AppError,
+    CacheError,
+    DocumentNotFoundError,
+    EmbeddingError,
+    FileTooLargeError,
+    GenerationAPIError,
+    GenerationTimeoutError,
+    InvalidFileTypeError,
+    NoDocumentsError,
+    PDFParsingError,
+    SessionExpiredError,
+    SessionNotFoundError,
+    StorageWriteError,
+    TextExtractionError,
+    ValidationError,
+    VectorStoreError,
+)
+from app.utils.logging import get_logger
 
-Error Response Format:
-    {
-        "error": {
-            "type": "PDFParsingError",
-            "message": "Human-readable error description",
-            "detail": "Additional context (debug mode only)",
-            "request_id": "uuid-for-tracing"
-        }
-    }
+logger = get_logger(__name__)
 
-Logging:
-    - All errors are logged with full stack trace at ERROR level
-    - 4xx errors include request context (path, method, client IP)
-    - 5xx errors trigger alert-level logging
+_STATUS_MAP: dict[type, int] = {
+    PDFParsingError: 422,
+    TextExtractionError: 422,
+    InvalidFileTypeError: 400,
+    FileTooLargeError: 400,
+    EmbeddingError: 502,
+    GenerationAPIError: 502,
+    GenerationTimeoutError: 504,
+    VectorStoreError: 500,
+    StorageWriteError: 500,
+    SessionNotFoundError: 404,
+    DocumentNotFoundError: 404,
+    SessionExpiredError: 410,
+    NoDocumentsError: 409,
+    ValidationError: 400,
+}
 
-Dependencies:
-    - fastapi (Request, Response)
-    - fastapi.responses (JSONResponse)
-    - app.exceptions (full exception hierarchy — single import resolves all types)
-    - app.utils.logging (get_logger)
-"""
+
+async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
+    request_id = str(uuid.uuid4())
+    exc.request_id = request_id
+
+    status = 500
+    for exc_type, code in _STATUS_MAP.items():
+        if isinstance(exc, exc_type):
+            status = code
+            break
+
+    if status >= 500:
+        logger.error(
+            "Unhandled error %s: %s",
+            type(exc).__name__, exc.message,
+            extra={"request_id": request_id},
+        )
+    else:
+        logger.warning(
+            "%s: %s",
+            type(exc).__name__, exc.message,
+            extra={"request_id": request_id},
+        )
+
+    return JSONResponse(
+        status_code=status,
+        content={
+            "error": {
+                "type": type(exc).__name__,
+                "message": exc.message,
+                "request_id": request_id,
+            }
+        },
+    )
+
+
+async def generic_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    request_id = str(uuid.uuid4())
+    logger.error(
+        "Unexpected error: %s\n%s",
+        exc,
+        traceback.format_exc(),
+        extra={"request_id": request_id},
+    )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": {
+                "type": "InternalServerError",
+                "message": "An unexpected error occurred.",
+                "request_id": request_id,
+            }
+        },
+    )

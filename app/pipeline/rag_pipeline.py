@@ -1,166 +1,314 @@
-"""
-RAG Pipeline — Central Query Orchestrator
-==========================================
+"""RAG Pipeline — central query orchestrator."""
+from __future__ import annotations
 
-Purpose:
-    The single entry point for all query-answer operations. API handlers
-    call RAGPipeline.run() or RAGPipeline.run_stream(). No other layer
-    (API, chain, service) should orchestrate the full pipeline end-to-end.
+import time
+import uuid
+from typing import AsyncGenerator
 
-    This module owns the authoritative execution order and wires together:
-        caches, session/memory, reformulation, embedding, retrieval,
-        reranking, history formatting, LLM generation, and turn persistence.
+from app.cache.embedding_cache import EmbeddingCache
+from app.cache.response_cache import ResponseCache
+from app.chains.rag_chain import RAGChain
+from app.config import Settings
+from app.db.session_store import SessionStore
+from app.exceptions import (
+    NoDocumentsError,
+    RerankerError,
+    SessionExpiredError,
+    SessionNotFoundError,
+)
+from app.memory.memory_manager import MemoryManager
+from app.models.query import (
+    GeneratedAnswer,
+    PipelineMetadata,
+    QueryContext,
+    RetrievedContext,
+    StreamingChunk,
+)
+from app.schemas.metadata import RetrievalMetadata
+from app.services.query_reformulator import QueryReformulator
+from app.services.reranker import RerankerService
+from app.services.retriever import RetrieverService
+from app.utils.logging import get_logger
 
-Why a Dedicated Pipeline Layer (not rag_chain.py):
-    app/chains/rag_chain.py is responsible for the LangChain/LangGraph
-    graph definition and LLM interaction only. It is infrastructure —
-    it does not know about caches, the reranker, or memory compression.
-    RAGPipeline is business logic — it decides WHAT to call, in WHAT order,
-    with WHAT fallbacks.
+logger = get_logger(__name__)
 
-    Splitting them keeps:
-    - chains/ swappable (swap LangGraph for raw OpenAI calls without
-      changing the pipeline)
-    - pipeline/ testable without any LLM (mock the chain)
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Full Execution Flow  (non-streaming)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+class RAGPipeline:
 
-  1. VALIDATE SESSION                                         ~0ms
-     ├── SessionStore.get_session(session_id)
-     ├── Raise SessionNotFoundError / SessionExpiredError
-     └── Extract: document_ids, turn_count
+    def __init__(
+        self,
+        session_store: SessionStore,
+        response_cache: ResponseCache,
+        embedding_cache: EmbeddingCache,
+        reformulator: QueryReformulator,
+        retriever: RetrieverService,
+        reranker: RerankerService,
+        memory_manager: MemoryManager,
+        rag_chain: RAGChain,
+        settings: Settings,
+    ) -> None:
+        self._sessions = session_store
+        self._response_cache = response_cache
+        self._embedding_cache = embedding_cache
+        self._reformulator = reformulator
+        self._retriever = retriever
+        self._reranker = reranker
+        self._memory = memory_manager
+        self._chain = rag_chain
+        self._settings = settings
 
-  2. RESPONSE CACHE CHECK (non-streaming only)                ~1ms
-     ├── ResponseCache.get_or_generate(query, session_id,
-     │       document_ids, turn_count, generate_fn=<step 3-9>)
-     ├── HIT  → return cached GeneratedAnswer immediately
-     └── MISS → continue to step 3
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
 
-  3. QUERY REFORMULATION (conditional)                     0–400ms
-     ├── IF turn_count == 0: standalone_query = raw_query   (0ms)
-     └── ELSE: QueryReformulator.reformulate(query, history) (~300ms)
-
-  4. QUERY EMBEDDING (cached)                            ~1–150ms
-     ├── EmbeddingCache.get_or_embed(standalone_query)
-     ├── HIT  → return cached vector                         (~1ms)
-     └── MISS → EmbeddingService.embed_query()             (~150ms)
-                  → store in EmbeddingCache
-
-  5. RETRIEVAL                                           ~10–100ms
-     ├── RetrieverService.retrieve(
-     │       query_embedding, document_ids, top_k=top_k_candidates)
-     │   Internally: vector search → score threshold filter
-     └── Returns: list[ScoredChunk] (pre-MMR candidates)
-
-  6. RERANKING (conditional)                             ~0–400ms
-     ├── IF RerankerService.is_enabled():
-     │       RerankerService.rerank(standalone_query, candidates)
-     │       → updates ScoredChunk.similarity_score (reranker score)
-     │       → preserves ScoredChunk.bi_encoder_score
-     └── ELSE: candidates pass through unchanged
-
-  7. MMR DIVERSITY SELECTION                               ~5–20ms
-     ├── RetrieverService.apply_mmr(reranked_candidates, top_k)
-     │       score = λ·relevance − (1−λ)·max_similarity_to_selected
-     └── Returns: final top_k ScoredChunk list
-
-  8. MEMORY READ                                             ~1ms
-     └── MemoryManager.get_formatted_history(
-               session_id, token_budget=MEMORY_TOKEN_BUDGET)
-         → Returns formatted history string for prompt injection
-
-  9. CONTEXT ASSEMBLY → QueryContext populated:
-     │   raw_query, standalone_query, query_embedding,
-     │   session_id, document_ids, query_id (new UUID),
-     │   formatted_history, reranker_applied, cache_hit=False
-
- 10. LLM GENERATION                                   ~500–1500ms
-     ├── RAGChain.invoke(query_context, retrieved_context)
-     │       → Builds prompt (system + context + history + question)
-     │       → Calls OpenAI Chat Completion API
-     │       → Extracts and validates citations
-     └── Returns: GeneratedAnswer
-
- 11. MEMORY WRITE                                           ~1ms
-     └── MemoryManager.record_turn(session_id, ...)
-         → Appends ConversationTurn to session
-         → Triggers MemoryCompressor if turn_count ≥ threshold
-
- 12. RETURN GeneratedAnswer
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Streaming Variant  (run_stream)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  Steps 1, 3–9 are identical to the non-streaming flow (all blocking).
-  Step 2 (ResponseCache) is SKIPPED — streaming responses cannot be
-  replayed from a cached object.
-  Step 10 uses RAGChain.stream() → yields SSE tokens via StreamingHandler.
-  Step 11 (memory write) executes after the stream is exhausted.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Error Handling
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  All AppError subclasses raised by any called service propagate up
-  to the FastAPI error_handler middleware unchanged. The pipeline does
-  not catch and re-wrap them (avoids double-wrapping).
-
-  Exception: CacheError is caught internally (cache misses are silently
-  treated as misses; the pipeline continues on the uncached path).
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Methods
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    run(
+    async def run(
+        self,
         raw_query: str,
         session_id: str,
         document_ids: list[str] | None = None,
-        top_k: int | None = None
+        top_k: int | None = None,
     ) -> GeneratedAnswer:
-        Full synchronous pipeline. Consults and writes ResponseCache.
-        Inputs:
-            raw_query    — user's original question text
-            session_id   — active session UUID
-            document_ids — optional override; defaults to all session docs
-            top_k        — optional retrieval override; defaults to settings.TOP_K
-        Outputs:
-            GeneratedAnswer with answer_text, citations, confidence,
-            retrieval_context, query_id, cache_hit, pipeline_metadata
+        """Full non-streaming pipeline. Consults and stores ResponseCache."""
+        t_total = time.monotonic()
+        query_id = str(uuid.uuid4())
 
-    run_stream(
+        # Step 1 — validate session
+        session = await self._sessions.get_session(session_id)
+        if session is None:
+            raise SessionNotFoundError(f"Session {session_id} not found or expired.")
+        doc_ids = document_ids or session.document_ids
+        if not doc_ids:
+            raise NoDocumentsError("Session has no documents to query.")
+
+        # Step 2 — response cache check
+        async def generate_fn() -> GeneratedAnswer:
+            return await self._run_pipeline(
+                raw_query, session_id, doc_ids, top_k, query_id, t_total
+            )
+
+        answer = await self._response_cache.get_or_generate(
+            query_text=raw_query,
+            session_id=session_id,
+            document_ids=doc_ids,
+            turn_count=session.turn_count,
+            generate_fn=generate_fn,
+        )
+        return answer
+
+    async def run_stream(
+        self,
         raw_query: str,
         session_id: str,
         document_ids: list[str] | None = None,
-        top_k: int | None = None
+        top_k: int | None = None,
     ) -> AsyncGenerator[StreamingChunk, None]:
-        Streaming pipeline. Yields SSE events; bypasses ResponseCache.
-        Inputs: same as run()
-        Outputs: async generator of StreamingChunk events:
-            event="token"    → {"text": str, "query_id": str}
-            event="citation" → {"citations": list[Citation], "query_id": str}
-            event="done"     → {"query_id": str, "total_tokens": int,
-                                "retrieval_time_ms": float}
-            event="error"    → {"message": str, "query_id": str}
+        """Streaming pipeline — yields SSE events, skips ResponseCache."""
+        t_total = time.monotonic()
+        query_id = str(uuid.uuid4())
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Dependencies
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        session = await self._sessions.get_session(session_id)
+        if session is None:
+            raise SessionNotFoundError(f"Session {session_id} not found or expired.")
+        doc_ids = document_ids or session.document_ids
+        if not doc_ids:
+            raise NoDocumentsError("Session has no documents to query.")
 
-    app.db.session_store          (SessionStore — session validation)
-    app.cache.response_cache      (ResponseCache — full answer cache)
-    app.cache.embedding_cache     (EmbeddingCache — query vector cache)
-    app.services.query_reformulator (QueryReformulator)
-    app.services.retriever        (RetrieverService)
-    app.services.reranker         (RerankerService)
-    app.memory.memory_manager     (MemoryManager — history read/write)
-    app.chains.rag_chain          (RAGChain — LLM generation only)
-    app.services.streaming        (StreamingHandler — SSE formatting)
-    app.models.query              (QueryContext, GeneratedAnswer, StreamingChunk)
-    app.schemas.metadata          (RetrievalMetadata, PipelineMetadata)
-    app.exceptions                (SessionNotFoundError, NoDocumentsError, ...)
-    app.config                    (Settings)
-"""
+        query_ctx, retrieved_ctx = await self._prepare_context(
+            raw_query, session_id, doc_ids, top_k, query_id
+        )
+
+        full_text = ""
+        final_citations = []
+
+        try:
+            async for chunk in self._chain.stream(query_ctx, retrieved_ctx):
+                if chunk.event == "token":
+                    full_text += chunk.data.get("text", "")
+                    yield chunk
+                elif chunk.event == "citation":
+                    final_citations = chunk.data.get("citations", [])
+                    yield chunk
+        except Exception as exc:
+            yield StreamingChunk(
+                event="error",
+                data={"message": str(exc), "query_id": query_id},
+            )
+            return
+
+        elapsed_ms = (time.monotonic() - t_total) * 1000
+
+        # Compute confidence from retrieved chunk scores (mirrors RAGChain._compute_confidence)
+        chunks = retrieved_ctx.chunks
+        if chunks:
+            mean_score = sum(sc.similarity_score for sc in chunks) / len(chunks)
+            citation_factor = min(1.0, len(final_citations) / max(len(chunks), 1))
+            confidence = round(min(1.0, mean_score * (0.7 + 0.3 * citation_factor)), 3)
+        else:
+            confidence = 0.0
+
+        yield StreamingChunk(
+            event="done",
+            data={
+                "query_id": query_id,
+                "total_tokens": len(full_text.split()),
+                "retrieval_time_ms": retrieved_ctx.retrieval_metadata.retrieval_time_ms,
+                "reranker_applied": query_ctx.reranker_applied,
+                "confidence": confidence,
+            },
+        )
+
+        # Step 11 — memory write after stream exhausted
+        from app.models.query import Citation
+        citations_obj = [
+            Citation(
+                document_name=c["document_name"],
+                page_numbers=c["page_numbers"],
+                chunk_index=c["chunk_index"],
+                chunk_id=c["chunk_id"],
+                excerpt=c["excerpt"],
+            )
+            for c in final_citations
+        ]
+        await self._memory.record_turn(
+            session_id=session_id,
+            user_query=raw_query,
+            standalone_query=query_ctx.standalone_query,
+            assistant_response=full_text,
+            retrieved_chunk_ids=[sc.chunk.chunk_id for sc in retrieved_ctx.chunks],
+            citations=citations_obj,
+        )
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    async def _prepare_context(
+        self,
+        raw_query: str,
+        session_id: str,
+        doc_ids: list[str],
+        top_k: int | None,
+        query_id: str,
+    ) -> tuple[QueryContext, RetrievedContext]:
+        """Steps 3–9: reformulation → embedding → retrieval → reranking → MMR → memory."""
+        session = await self._sessions.get_session(session_id)
+        history = session.conversation_history if session else []
+
+        # Step 3 — reformulation
+        t0 = time.monotonic()
+        standalone_query = raw_query
+        reformulation_ms = 0.0
+        if history:
+            standalone_query = await self._reformulator.reformulate(raw_query, history)
+            reformulation_ms = (time.monotonic() - t0) * 1000
+
+        # Step 4 — embedding (via cache)
+        t0 = time.monotonic()
+        query_embedding = await self._embedding_cache.get_or_embed(standalone_query)
+        embedding_ms = (time.monotonic() - t0) * 1000
+
+        # Step 5 — retrieval (vector search + threshold)
+        t0 = time.monotonic()
+        candidates, retrieval_meta = await self._retriever.retrieve(
+            query_embedding=query_embedding,
+            document_ids=doc_ids,
+            top_k_candidates=self._settings.top_k_candidates,
+        )
+        retrieval_ms = (time.monotonic() - t0) * 1000
+
+        # Step 6 — reranking (conditional)
+        reranker_applied = False
+        reranking_ms = 0.0
+        if self._reranker.is_enabled() and candidates:
+            t0 = time.monotonic()
+            try:
+                candidates = await self._reranker.rerank(standalone_query, candidates)
+                reranker_applied = True
+            except RerankerError as exc:
+                logger.warning("Reranker failed, falling back to bi-encoder: %s", exc)
+            reranking_ms = (time.monotonic() - t0) * 1000
+
+        # Step 7 — MMR diversity selection
+        t0 = time.monotonic()
+        k = top_k or self._settings.top_k
+        final_chunks = self._retriever.apply_mmr(candidates, top_k=k)
+        mmr_ms = (time.monotonic() - t0) * 1000
+
+        # Fill retrieval metadata
+        retrieval_meta.reranker_applied = reranker_applied
+        retrieval_meta.chunks_used = len(final_chunks)
+        retrieval_meta.mmr_applied = len(candidates) > k
+        retrieval_meta.similarity_scores = [sc.similarity_score for sc in final_chunks]
+        retrieval_meta.retrieval_time_ms = retrieval_ms
+
+        # Step 8 — memory read
+        t0 = time.monotonic()
+        formatted_history = await self._memory.get_formatted_history(
+            session_id, token_budget=self._settings.memory_token_budget
+        )
+        memory_read_ms = (time.monotonic() - t0) * 1000
+
+        # Step 9 — assemble QueryContext
+        query_ctx = QueryContext(
+            raw_query=raw_query,
+            standalone_query=standalone_query,
+            query_id=query_id,
+            session_id=session_id,
+            document_ids=doc_ids,
+            query_embedding=query_embedding,
+            formatted_history=formatted_history,
+            reranker_applied=reranker_applied,
+            cache_hit=False,
+        )
+        retrieved_ctx = RetrievedContext(chunks=final_chunks, retrieval_metadata=retrieval_meta)
+
+        return query_ctx, retrieved_ctx
+
+    async def _run_pipeline(
+        self,
+        raw_query: str,
+        session_id: str,
+        doc_ids: list[str],
+        top_k: int | None,
+        query_id: str,
+        t_total: float,
+    ) -> GeneratedAnswer:
+        """Steps 3–11 for non-streaming path."""
+        query_ctx, retrieved_ctx = await self._prepare_context(
+            raw_query, session_id, doc_ids, top_k, query_id
+        )
+
+        # Step 10 — LLM generation
+        t0 = time.monotonic()
+        answer = await self._chain.invoke(query_ctx, retrieved_ctx)
+        generation_ms = (time.monotonic() - t0) * 1000
+
+        # Step 11 — memory write
+        t0 = time.monotonic()
+        await self._memory.record_turn(
+            session_id=session_id,
+            user_query=raw_query,
+            standalone_query=query_ctx.standalone_query,
+            assistant_response=answer.answer_text,
+            retrieved_chunk_ids=[sc.chunk.chunk_id for sc in retrieved_ctx.chunks],
+            citations=answer.citations,
+        )
+        memory_write_ms = (time.monotonic() - t0) * 1000
+
+        total_ms = (time.monotonic() - t_total) * 1000
+        meta = retrieved_ctx.retrieval_metadata
+
+        answer.query_id = query_id
+        answer.cache_hit = False
+        answer.retrieval_context = retrieved_ctx
+        answer.pipeline_metadata = PipelineMetadata(
+            query_id=query_id,
+            total_time_ms=total_ms,
+            generation_time_ms=generation_ms,
+            memory_write_time_ms=memory_write_ms,
+            retrieval_time_ms=meta.retrieval_time_ms,
+            reranker_backend=self._settings.reranker_backend,
+            llm_model=self._settings.llm_model,
+            embedding_model=self._settings.embedding_model,
+        )
+        return answer

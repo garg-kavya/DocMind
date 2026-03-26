@@ -1,44 +1,51 @@
-"""
-Logging Configuration
-======================
+"""Structured JSON logging configuration."""
+from __future__ import annotations
 
-Purpose:
-    Configures structured JSON logging for the application. Structured logs
-    enable efficient log aggregation, filtering, and alerting in production.
+import logging
+import sys
 
-Configuration:
 
-    Format: JSON lines (one JSON object per log entry)
-    Fields per log entry:
-        - timestamp: ISO 8601
-        - level: DEBUG | INFO | WARNING | ERROR | CRITICAL
-        - logger: logger name (module path)
-        - message: human-readable message
-        - extra: dict of structured context fields
+class _JsonFormatter(logging.Formatter):
+    """Emit log records as single-line JSON objects."""
 
-    Contextual Fields (added by middleware/services):
-        - request_id: str (unique per request, for tracing)
-        - session_id: str (if in a session context)
-        - document_id: str (if processing a document)
-        - latency_ms: float (for performance tracking)
+    def format(self, record: logging.LogRecord) -> str:
+        import json
+        import traceback
 
-    Log Levels by Module:
-        - app.api.*: INFO (request/response logging)
-        - app.services.*: INFO (pipeline stage logging)
-        - app.db.*: WARNING (only errors and slow queries)
-        - uvicorn: WARNING
+        payload: dict = {
+            "timestamp": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
 
-Functions:
+        # Structured extra fields
+        for key in ("request_id", "session_id", "document_id", "latency_ms"):
+            if hasattr(record, key):
+                payload[key] = getattr(record, key)
 
-    setup_logging(log_level: str = "INFO") -> None:
-        Configures the root logger with JSON formatting.
-        Called once at application startup.
+        if record.exc_info:
+            payload["exc_info"] = traceback.format_exception(*record.exc_info)
 
-    get_logger(name: str) -> logging.Logger:
-        Returns a named logger instance.
+        return json.dumps(payload)
 
-Dependencies:
-    - logging (stdlib)
-    - json (stdlib)
-    - Optional: python-json-logger (for JSON formatting)
-"""
+
+def setup_logging(log_level: str = "INFO") -> None:
+    """Configure root logger with JSON formatting. Call once at startup."""
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(_JsonFormatter())
+
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(getattr(logging, log_level.upper(), logging.INFO))
+
+    # Quieten noisy third-party loggers
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("openai").setLevel(logging.WARNING)
+
+
+def get_logger(name: str) -> logging.Logger:
+    """Return a named logger instance."""
+    return logging.getLogger(name)
