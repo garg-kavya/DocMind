@@ -4,6 +4,19 @@ A production-grade Retrieval-Augmented Generation system for answering questions
 
 Every answer is grounded exclusively in uploaded PDF content.
 
+**Live demo:** Deploy your own on [Railway](https://railway.app) using the included `Dockerfile` and `railway.json`.
+
+---
+
+## Features
+
+- **Web UI** — ChatGPT-style interface with sidebar showing previous chats, session switching, and persistent history
+- **Streaming responses** — tokens arrive in real time with a typing effect (SSE)
+- **Conversational memory** — multi-turn follow-up questions resolved automatically
+- **Source citations** — every answer cites the exact PDF pages used
+- **Persistent sessions** — sessions, documents, and FAISS index survive server restarts
+- **Optional reranking** — cross-encoder or Cohere reranker for higher precision
+
 ---
 
 ## Architecture
@@ -19,9 +32,8 @@ API Layer
                                       ├── ResponseCache (check/store)
                                       ├── QueryReformulator
                                       ├── EmbeddingCache (embed query)
-                                      ├── RetrieverService (search + threshold)
+                                      ├── RetrieverService (search + MMR)
                                       ├── RerankerService (cross-encoder, optional)
-                                      ├── RetrieverService.apply_mmr (diversity)
                                       ├── MemoryManager (read history)
                                       ├── RAGChain (prompt + LLM + citations)
                                       └── MemoryManager (write turn)
@@ -36,7 +48,7 @@ API Layer
 | **Services** | `app/services/` | Single-responsibility units (parse, chunk, embed, retrieve, rerank). |
 | **Cache** | `app/cache/` | Embedding cache (24h) and response cache (60s). |
 | **Memory** | `app/memory/` | History formatting, token budgeting, compression. |
-| **DB** | `app/db/` | VectorStore, SessionStore, DocumentRegistry. |
+| **DB** | `app/db/` | VectorStore, SessionStore, DocumentRegistry (all disk-persisted). |
 
 ---
 
@@ -45,13 +57,13 @@ API Layer
 | Layer | Technology |
 |---|---|
 | Web framework | FastAPI (async) |
-| LLM orchestration | LangChain / LangGraph |
 | LLM + Embeddings | OpenAI (`gpt-4o`, `text-embedding-3-small`) |
 | Vector DB | FAISS (default) / ChromaDB |
 | PDF parsing | PyMuPDF + pdfplumber (fallback) |
 | Tokenization | tiktoken |
 | Reranker (optional) | Cohere Rerank API or local cross-encoder |
-| Containerization | Docker |
+| Frontend | Vanilla JS + CSS (served as static files) |
+| Containerization | Docker + Railway |
 
 ---
 
@@ -60,8 +72,8 @@ API Layer
 ### 1. Clone and configure
 
 ```bash
-git clone <repo-url>
-cd "RAG-PDF Q&A"
+git clone https://github.com/garg-kavya/rag-pdf-qa
+cd "rag-pdf-qa"
 cp .env.example .env
 # Edit .env and set OPENAI_API_KEY=sk-...
 ```
@@ -77,11 +89,23 @@ docker-compose up --build
 ```bash
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
+pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
-Service: `http://localhost:8000` — Interactive docs: `http://localhost:8000/docs`
+Open **`http://localhost:8000`** to use the web UI.
+API docs: `http://localhost:8000/docs`
+
+---
+
+## Deployment (Railway)
+
+1. Push this repo to GitHub
+2. Create a new Railway project → "Deploy from GitHub repo"
+3. Add `OPENAI_API_KEY` in Railway's environment variables
+4. Railway auto-detects `Dockerfile` and `railway.json`; deploys on every push
+
+The app reads `PORT` from Railway's environment automatically.
 
 ---
 
@@ -98,6 +122,8 @@ Service: `http://localhost:8000` — Interactive docs: `http://localhost:8000/do
 | `POST` | `/api/v1/query` | Ask a question (full response) |
 | `POST` | `/api/v1/query/stream` | Ask a question (SSE streaming) |
 | `GET` | `/api/v1/health` | Service health + stats |
+| `GET` | `/api/v1/debug/index` | FAISS index stats + stored doc IDs |
+| `GET` | `/api/v1/debug/search?q=...` | Raw similarity scores for a query |
 
 Full contracts: [`docs/api_contracts.md`](docs/api_contracts.md)
 
@@ -157,7 +183,7 @@ curl -X POST http://localhost:8000/api/v1/query \
 | `VECTOR_STORE_TYPE` | `faiss` | `faiss` or `chroma` |
 | `TOP_K` | `5` | Final chunks passed to LLM |
 | `TOP_K_CANDIDATES` | `10` | Candidates fetched before reranking |
-| `SIMILARITY_THRESHOLD` | `0.70` | Min relevance score |
+| `SIMILARITY_THRESHOLD` | `0.0` | Min relevance score (0.0 = disabled) |
 | `RERANKER_BACKEND` | `none` | `none`, `cross_encoder`, or `cohere` |
 | `COHERE_API_KEY` | — | Required if `RERANKER_BACKEND=cohere` |
 | `EMBEDDING_CACHE_TTL_SECONDS` | `86400` | 24h embedding cache |
@@ -165,7 +191,9 @@ curl -X POST http://localhost:8000/api/v1/query \
 | `MEMORY_TOKEN_BUDGET` | `1024` | Max tokens for conversation history |
 | `SESSION_TTL_MINUTES` | `60` | Session inactivity expiry |
 
-Full reference: [`.env.example`](.env.example) and [`configs/default.yaml`](configs/default.yaml)
+Full reference: [`.env.example`](.env.example)
+
+> **Note on `SIMILARITY_THRESHOLD`:** `text-embedding-3-small` cosine similarity scores for semantically related (but not near-identical) text typically fall in the 0.10–0.29 range. The default of `0.0` disables threshold filtering so all retrieved chunks are passed to MMR. Raise this only if you are seeing irrelevant chunks in answers.
 
 ---
 
@@ -229,9 +257,10 @@ python scripts/seed_test_data.py
 ```
 app/
 ├── api/             FastAPI endpoints (thin: validate → delegate → map)
-│   ├── v1/          documents, query, sessions, health
+│   ├── v1/          documents, query, sessions, health, debug
 │   └── middleware/  rate limiter, error handler
-├── pipeline/        ◄── orchestration layer (new)
+├── frontend/        Web UI (HTML + CSS + JS, served as static files)
+├── pipeline/        ◄── orchestration layer
 │   ├── rag_pipeline.py       query orchestrator
 │   └── ingestion_pipeline.py PDF ingestion orchestrator
 ├── chains/          LLM-only: prompt assembly, OpenAI call, citation parse
@@ -250,9 +279,15 @@ app/
 ├── dependencies.py  DI wiring + startup order
 └── main.py          FastAPI app + lifespan
 
+data/                Persisted FAISS index, session store, document registry
+uploads/             Uploaded PDF files
 tests/               Unit + integration stubs for all modules
 docs/                Architecture, data flow, retrieval strategy, API contracts
 scripts/             benchmark.py, seed_test_data.py
+Dockerfile           Multi-stage Docker build for Railway/production
+docker-compose.yml   Local development with volume mounts
+railway.json         Railway deployment configuration
+requirements.txt     Pinned production dependencies
 ```
 
 ---

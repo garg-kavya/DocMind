@@ -486,6 +486,65 @@ data: {"message": "Generation interrupted: OpenAI API timeout", "query_id": "q-f
 
 ---
 
+## 11. Debug — Index Stats
+
+### `GET /api/v1/debug/index`
+
+Returns FAISS index statistics and the list of documents currently stored in the vector index. Useful for diagnosing ingestion issues.
+
+#### Response — `200 OK`
+
+```json
+{
+    "total_vectors": 184,
+    "index_type": "IndexFlatIP",
+    "documents_in_registry": 3,
+    "document_ids_in_index": [
+        "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+        "c3d4e5f6-a7b8-9012-cdef-123456789012"
+    ]
+}
+```
+
+---
+
+## 12. Debug — Similarity Search
+
+### `GET /api/v1/debug/search?q={query}&doc_id={doc_id}`
+
+Embeds the query and returns raw cosine similarity scores for all matching chunks. Use this to diagnose why a query may not be retrieving expected content.
+
+#### Query Parameters
+
+| Param | Type | Required | Description |
+|---|---|---|---|
+| `q` | string | Yes | The search query |
+| `doc_id` | string (UUID) | No | Filter to a specific document |
+
+#### Response — `200 OK`
+
+```json
+{
+    "query": "what is the revenue?",
+    "candidates_considered": 10,
+    "candidates_after_threshold": 8,
+    "results": [
+        {
+            "chunk_id": "d4e5f6a7-b8c9-0123-defg-234567890123",
+            "document_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "similarity_score": 0.24,
+            "page_numbers": [5],
+            "excerpt": "Q3 2024 revenue reached $4.2 million..."
+        }
+    ]
+}
+```
+
+> **Note on similarity scores:** `text-embedding-3-small` cosine similarity for semantically related (but not near-identical) text typically falls in the 0.10–0.29 range. Scores above 0.30 indicate very strong lexical overlap. This is expected behaviour — not low quality retrieval.
+
+---
+
 ## Common Error Response Format
 
 All error responses follow this structure:
