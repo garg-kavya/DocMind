@@ -1,4 +1,4 @@
-# Architecture — RAG PDF Q&A System
+# Architecture — DocMind
 
 ## Overview
 

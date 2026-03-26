@@ -1,11 +1,11 @@
 # =============================================================================
-# Default Configuration — RAG PDF Q&A
+# Default Configuration — DocMind
 # =============================================================================
 # Base configuration values. Environment variables take precedence.
 # =============================================================================
 
 # app:
-#   name: "RAG PDF Q&A"
+#   name: "DocMind"
 #   version: "0.1.0"
 #   debug: false
 #   log_level: "INFO"

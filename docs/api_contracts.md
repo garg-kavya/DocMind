@@ -1,4 +1,4 @@
-# API Contracts — RAG PDF Q&A System
+# API Contracts — DocMind
 
 All endpoints are prefixed with `/api/v1`. All request/response bodies are JSON unless specified otherwise.
 
