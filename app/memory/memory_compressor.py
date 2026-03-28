@@ -1,10 +1,9 @@
 """Memory Compressor — summarise old turns to keep history bounded."""
 from __future__ import annotations
 
-from openai import AsyncOpenAI
-
 from app.config import Settings
 from app.models.session import ConversationTurn
+from app.utils.openai_client import make_openai_client
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -22,7 +21,7 @@ Summary:"""
 class MemoryCompressor:
 
     def __init__(self, settings: Settings) -> None:
-        self._client = AsyncOpenAI(api_key=settings.openai_api_key)
+        self._client = make_openai_client(settings)
         self._threshold = settings.compression_threshold
         self._n_compress = settings.compression_turns
 
