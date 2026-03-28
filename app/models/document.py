@@ -18,6 +18,7 @@ class Document:
     file_path: str
     file_size_bytes: int
     document_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str = ""
     status: DocumentStatus = "uploaded"
     page_count: int = 0
     total_chunks: int = 0

@@ -85,11 +85,13 @@ function handleLogout() {
   document.getElementById('authOverlay').style.display = 'flex';
 }
 
-function showMainApp() {
+async function showMainApp() {
   const auth = getAuth();
   document.getElementById('authOverlay').style.display = 'none';
   document.getElementById('mainApp').style.display = 'flex';
   if (auth) document.getElementById('footerUser').textContent = auth.email;
+  // Hydrate sidebar with user's existing documents from the server
+  if (auth && auth.token) await refreshDocStatuses();
 }
 
 /* ─── Persistent store helpers ──────────────────────── */
@@ -174,6 +176,51 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 });
 
+/* ─── Doc library helpers ───────────────────────────────── */
+
+// Fetch the current user's document library from the server and update state.
+async function refreshDocStatuses() {
+  try {
+    const data = await apiFetch('/api/v1/documents');
+    const docs = data.documents || [];
+    state.docStatuses = {};
+    state.documentIds = [];
+    for (const doc of docs) {
+      state.documentIds.push(doc.document_id);
+      state.docStatuses[doc.document_id] = {
+        name:   doc.filename,
+        status: doc.status,
+        chunks: doc.total_chunks,
+        pages:  doc.page_count,
+      };
+    }
+    renderDocList();
+  } catch (_) {}
+}
+
+// When a session expires, create a new one — the server auto-attaches
+// the user's ready documents so no re-upload is needed.
+async function autoRenewSession() {
+  try {
+    await refreshDocStatuses();
+    const hasReady = Object.values(state.docStatuses).some(d => d.status === 'ready');
+    if (!hasReady) {
+      messageInput.placeholder = 'Upload a PDF to start chatting…';
+      return;
+    }
+    const sess = await apiFetch('/api/v1/sessions', 'POST', {});
+    state.sessionId = sess.session_id;
+    state.documentIds = sess.document_ids;
+    saveCurrentSession();
+    if (sess.document_ids.length > 0) {
+      enableChat();
+      if (state.messages.length > 0) {
+        showToast('Session renewed — your documents are still available.', 'success');
+      }
+    }
+  } catch (_) {}
+}
+
 /* ─── Session restore ───────────────────────────────── */
 async function restoreLastSession() {
   const s = getStore();
@@ -223,12 +270,9 @@ async function loadSession(localId, saveBeforeSwitch = true) {
 
   if (backendAlive && Object.values(state.docStatuses).some(d => d.status === 'ready')) {
     enableChat();
-  } else if (!backendAlive && state.messages.length > 0) {
-    // Show history read-only; session expired
-    messageInput.disabled = true;
-    sendBtn.disabled = true;
-    messageInput.placeholder = 'Session expired — upload a new PDF to continue.';
-    showToast('Session expired. Upload a PDF to start querying again.', 'error');
+  } else if (!backendAlive) {
+    // Session expired — try to auto-renew using user's existing documents
+    await autoRenewSession();
   }
 }
 

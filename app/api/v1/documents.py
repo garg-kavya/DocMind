@@ -55,6 +55,7 @@ async def upload_document(
         filename=file.filename or "upload.pdf",
         file_path=file_path,
         file_size_bytes=file_size,
+        user_id=current_user.user_id,
     )
 
     background_tasks.add_task(
@@ -82,7 +83,7 @@ async def get_document(
     current_user: User = Depends(get_current_user),
 ):
     doc = await registry.get(document_id)
-    if doc is None:
+    if doc is None or doc.user_id != current_user.user_id:
         raise DocumentNotFoundError(f"Document {document_id} not found.")
     return _doc_to_response(doc)
 
@@ -93,7 +94,7 @@ async def list_documents(
     registry: DocumentRegistry = Depends(get_document_registry),
     current_user: User = Depends(get_current_user),
 ):
-    docs = await registry.get_all(status=status)
+    docs = await registry.get_by_user(current_user.user_id, status=status)
     return DocumentListResponse(
         documents=[_doc_to_response(d) for d in docs],
         total_count=len(docs),
@@ -109,7 +110,7 @@ async def delete_document(
     current_user: User = Depends(get_current_user),
 ):
     doc = await registry.get(document_id)
-    if doc is None:
+    if doc is None or doc.user_id != current_user.user_id:
         raise DocumentNotFoundError(f"Document {document_id} not found.")
 
     chunks_removed = await vector_store.delete_document(document_id)
