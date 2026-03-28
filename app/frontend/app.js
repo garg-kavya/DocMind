@@ -15,6 +15,12 @@
 const STORE_KEY  = 'rag_store';
 const AUTH_KEY   = 'rag_auth';   // { token, user_id, email }
 
+// Markdown renderer — GFM + soft line breaks
+marked.use({ gfm: true, breaks: true });
+function renderMarkdown(text) {
+  return DOMPurify.sanitize(marked.parse(text || ''));
+}
+
 /* ─── Auth helpers ───────────────────────────────────── */
 function getAuth()  { try { return JSON.parse(localStorage.getItem(AUTH_KEY)) || null; } catch { return null; } }
 function setAuth(a) { localStorage.setItem(AUTH_KEY, JSON.stringify(a)); }
@@ -490,10 +496,10 @@ async function streamQuery(question, contentEl, rowEl) {
               firstToken = false;
               if (dotsEl) dotsEl.remove();
               contentEl.style.display = '';
-              contentEl.classList.add('typing-cursor');
+              contentEl.classList.add('typing-cursor', 'markdown-body');
             }
 
-            // Append only the new delta — no full re-render
+            // Append only the new delta as raw text during streaming
             contentEl.appendChild(document.createTextNode(delta));
             fullText += delta;
             scrollToBottom();
@@ -510,8 +516,11 @@ async function streamQuery(question, contentEl, rowEl) {
     }
   }
 
-  // Stream finished — remove cursor
+  // Stream finished — remove cursor, render accumulated markdown
   contentEl.classList.remove('typing-cursor');
+  if (!firstToken && fullText) {
+    contentEl.innerHTML = renderMarkdown(fullText);
+  }
 
   // If no tokens ever arrived (empty response), clean up dots and show fallback
   if (firstToken) {
@@ -541,8 +550,12 @@ function renderAssistantMessage(text, citations, confidence) {
   const bubble  = document.createElement('div');
   bubble.className = 'msg-bubble';
   const content = document.createElement('div');
-  content.className = 'msg-content';
-  content.textContent = text || '(No response)';
+  content.className = 'msg-content markdown-body';
+  if (text && text !== '(No response)') {
+    content.innerHTML = renderMarkdown(text);
+  } else {
+    content.textContent = '(No response)';
+  }
   bubble.appendChild(content);
   if (citations && citations.length > 0) bubble.appendChild(buildCitationsEl(citations));
   if (confidence !== null && confidence !== undefined) bubble.appendChild(buildConfidenceEl(confidence));
