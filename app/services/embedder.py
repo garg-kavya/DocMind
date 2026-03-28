@@ -3,10 +3,9 @@ from __future__ import annotations
 
 import asyncio
 
-from openai import AsyncOpenAI
-
 from app.config import Settings
 from app.exceptions import EmbeddingAPIError, EmbeddingTimeoutError
+from app.utils.openai_client import make_openai_client
 from app.models.chunk import Chunk
 from app.utils.logging import get_logger
 
@@ -17,7 +16,7 @@ class EmbedderService:
     """Generate embeddings via the OpenAI Embeddings API."""
 
     def __init__(self, settings: Settings) -> None:
-        self._client = AsyncOpenAI(api_key=settings.openai_api_key)
+        self._client = make_openai_client(settings)
         self._model = settings.embedding_model
         self._batch_size = settings.embedding_batch_size
         self._dimensions = settings.embedding_dimensions

@@ -4,8 +4,6 @@ from __future__ import annotations
 import re
 from typing import AsyncGenerator
 
-from openai import AsyncOpenAI
-
 from app.chains.prompts import (
     CONTEXT_TEMPLATE,
     NO_CONTEXT_RESPONSE,
@@ -14,6 +12,7 @@ from app.chains.prompts import (
 )
 from app.config import Settings
 from app.exceptions import GenerationAPIError, GenerationTimeoutError
+from app.utils.openai_client import make_openai_client
 from app.models.query import (
     Citation,
     GeneratedAnswer,
@@ -32,7 +31,7 @@ class RAGChain:
     """LLM-only: prompt assembly → OpenAI call → citation extraction."""
 
     def __init__(self, settings: Settings) -> None:
-        self._client = AsyncOpenAI(api_key=settings.openai_api_key)
+        self._client = make_openai_client(settings)
         self._model = settings.llm_model
         self._temperature = settings.llm_temperature
         self._max_tokens = settings.llm_max_tokens

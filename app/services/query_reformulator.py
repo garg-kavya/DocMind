@@ -1,10 +1,9 @@
 """Query Reformulation Service — resolve follow-up questions."""
 from __future__ import annotations
 
-from openai import AsyncOpenAI
-
 from app.config import Settings
 from app.models.session import ConversationTurn
+from app.utils.openai_client import make_openai_client
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -36,7 +35,7 @@ Standalone search query:"""
 class QueryReformulator:
 
     def __init__(self, settings: Settings) -> None:
-        self._client = AsyncOpenAI(api_key=settings.openai_api_key)
+        self._client = make_openai_client(settings)
         # Use a fast, cheap model for reformulation
         self._model = "gpt-4o-mini"
 
