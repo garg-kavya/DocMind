@@ -27,12 +27,14 @@ class DocumentRegistry:
         filename: str,
         file_path: str,
         file_size_bytes: int,
+        user_id: str = "",
     ) -> Document:
         doc = Document(
             document_id=document_id,
             filename=filename,
             file_path=file_path,
             file_size_bytes=file_size_bytes,
+            user_id=user_id,
             status="uploaded",
         )
         async with self._lock:
@@ -77,6 +79,13 @@ class DocumentRegistry:
     async def get_all(self, status: str | None = None) -> list[Document]:
         async with self._lock:
             docs = list(self._docs.values())
+        if status:
+            docs = [d for d in docs if d.status == status]
+        return docs
+
+    async def get_by_user(self, user_id: str, status: str | None = None) -> list[Document]:
+        async with self._lock:
+            docs = [d for d in self._docs.values() if d.user_id == user_id]
         if status:
             docs = [d for d in docs if d.status == status]
         return docs
@@ -135,6 +144,7 @@ class DocumentRegistry:
             "filename": doc.filename,
             "file_path": doc.file_path,
             "file_size_bytes": doc.file_size_bytes,
+            "user_id": doc.user_id,
             "status": doc.status,
             "page_count": doc.page_count,
             "total_chunks": doc.total_chunks,
@@ -152,6 +162,7 @@ class DocumentRegistry:
         doc.filename = d["filename"]
         doc.file_path = d["file_path"]
         doc.file_size_bytes = d["file_size_bytes"]
+        doc.user_id = d.get("user_id", "")
         doc.status = d["status"]
         doc.page_count = d.get("page_count", 0)
         doc.total_chunks = d.get("total_chunks", 0)

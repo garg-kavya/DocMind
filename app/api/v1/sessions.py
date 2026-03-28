@@ -6,8 +6,9 @@ from datetime import datetime
 from fastapi import APIRouter, Depends
 
 from app.cache.response_cache import ResponseCache
+from app.db.document_registry import DocumentRegistry
 from app.db.session_store import SessionStore
-from app.dependencies import get_current_user, get_response_cache, get_session_store
+from app.dependencies import get_current_user, get_document_registry, get_response_cache, get_session_store
 from app.exceptions import SessionNotFoundError
 from app.models.user import User
 from app.schemas.session import (
@@ -25,9 +26,16 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 async def create_session(
     body: SessionCreateRequest,
     store: SessionStore = Depends(get_session_store),
+    registry: DocumentRegistry = Depends(get_document_registry),
     current_user: User = Depends(get_current_user),
 ):
-    session = await store.create_session(body.document_ids or [])
+    doc_ids = body.document_ids
+    if not doc_ids:
+        # Auto-attach all of this user's ready documents so a new session
+        # never forces re-upload when the previous session expires.
+        user_docs = await registry.get_by_user(current_user.user_id, status="ready")
+        doc_ids = [d.document_id for d in user_docs]
+    session = await store.create_session(doc_ids)
     expires_at = store.expires_at(session)
     return SessionCreateResponse(
         session_id=session.session_id,
