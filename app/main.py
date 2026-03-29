@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 import asyncpg
 from fastapi import FastAPI
+from pgvector.asyncpg import register_vector
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -39,13 +40,24 @@ async def lifespan(app: FastAPI):
     for key, value in state.items():
         setattr(app.state, key, value)
 
-    # PostgreSQL connection pool — shared across all containers
-    pg_pool = await asyncpg.create_pool(settings.database_url, min_size=2, max_size=10)
+    # Step 1: enable pgvector extension using a single bootstrap connection
+    # (must exist before the pool registers the vector codec on each connection)
+    _boot = await asyncpg.connect(settings.database_url)
+    await _boot.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    await _boot.close()
+
+    # Step 2: connection pool — register_vector codec on every new connection
+    pg_pool = await asyncpg.create_pool(
+        settings.database_url, min_size=2, max_size=10, init=register_vector
+    )
+
+    # Step 3: inject pool into all PostgreSQL-backed stores
+    app.state.vector_store._pool = pg_pool
     app.state.user_store._pool = pg_pool
     app.state.token_blocklist._pool = pg_pool
 
-    # Restore persisted state: vectors, document registry, sessions, users
-    await app.state.vector_store.load_from_disk()
+    # Step 4: initialize schemas + restore persisted state
+    await app.state.vector_store.initialize()
     await app.state.document_registry.load_from_disk()
     await app.state.session_store.load_from_disk()
     await app.state.user_store.create_table()

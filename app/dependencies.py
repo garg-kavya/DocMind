@@ -11,6 +11,7 @@ from app.cache.response_cache import ResponseCache
 from app.chains.rag_chain import RAGChain
 from app.config import Settings, get_settings
 from app.db.document_registry import DocumentRegistry
+from app.db.pgvector_store import PGVectorStore
 from app.db.session_store import SessionStore
 from app.db.token_blocklist import TokenBlocklist
 from app.db.user_store import UserStore
@@ -33,18 +34,11 @@ from app.services.text_cleaner import TextCleanerService
 
 def build_app_state(settings: Settings) -> dict:
     """Construct the full object graph at startup. Returns a dict for app.state."""
-    # Storage
-    if settings.vector_store_type == "chroma":
-        from app.db.chroma_store import ChromaStore
-        vector_store: VectorStore = ChromaStore(
-            persist_path=f"{settings.vector_store_path}/chroma"
-        )
-    else:
-        from app.db.faiss_store import FAISSStore
-        vector_store = FAISSStore(
-            dimensions=settings.embedding_dimensions,
-            persist_path=f"{settings.vector_store_path}/faiss",
-        )
+    # Storage — pgvector (pool injected in main.py lifespan)
+    vector_store: VectorStore = PGVectorStore(
+        dimensions=settings.embedding_dimensions,
+        pool=None,  # type: ignore[arg-type]
+    )
 
     _data_dir = settings.vector_store_path  # e.g. "./data"
     session_store = SessionStore(settings, persist_path=f"{_data_dir}/sessions.json")
