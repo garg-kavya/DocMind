@@ -23,8 +23,8 @@ services:
     environment:
       DATABASE_URL: postgresql://docmind:docmind@postgres:5432/docmind
     volumes:
-      - ./uploads:/app/uploads   # PDF storage
-      - ./data:/app/data         # ChromaDB index + sessions + registry
+      - docmind_uploads:/app/uploads   # PDF storage (persistent)
+      - docmind_data:/app/data         # ChromaDB index + sessions + registry (persistent)
     depends_on:
       postgres:
         condition: service_healthy
@@ -39,3 +39,5 @@ services:
 
 volumes:
   postgres_data:
+  docmind_uploads:
+  docmind_data:
