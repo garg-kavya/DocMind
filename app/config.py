@@ -40,7 +40,6 @@ class Settings(BaseSettings):
     split_separators: list[str] = ["\n\n", "\n", ". ", " "]
 
     # --- Retrieval ---
-    vector_store_type: Literal["faiss", "chroma"] = "chroma"
     top_k: int = 10
     top_k_candidates: int = 20
     similarity_threshold: float = 0.0

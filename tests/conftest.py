@@ -301,7 +301,9 @@ async def test_client(tmp_path):
     _mock_pool.acquire = MagicMock(return_value=_mock_conn)
     _mock_pool.close = AsyncMock()
 
-    with patch("app.main.asyncpg.create_pool", new=AsyncMock(return_value=_mock_pool)):
+    with patch("app.main.asyncpg.connect", new=AsyncMock(return_value=_mock_conn)), \
+         patch("app.main.asyncpg.create_pool", new=AsyncMock(return_value=_mock_pool)), \
+         patch("app.main.register_vector", new=AsyncMock()):
         _app = create_app()
 
         _app.dependency_overrides[_deps.get_settings] = lambda: _settings
