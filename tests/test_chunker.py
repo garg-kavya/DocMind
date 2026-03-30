@@ -45,7 +45,7 @@ def short_text() -> str:
 def test_chunk_sizes_within_budget(chunker, long_text):
     chunks = chunker.chunk(long_text, [0], "doc-1", "test.pdf")
     for c in chunks:
-        assert c.token_count <= chunker._chunk_size
+        assert c.token_count <= chunker._max_tokens
 
 
 def test_empty_text_returns_empty_list(chunker):

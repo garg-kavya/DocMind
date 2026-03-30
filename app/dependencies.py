@@ -30,6 +30,7 @@ from app.services.query_router import QueryRouter
 from app.services.reranker import RerankerService
 from app.services.retriever import RetrieverService
 from app.services.streaming import StreamingHandler
+from app.services.table_extractor import TableExtractorService
 from app.services.text_cleaner import TextCleanerService
 from app.tools.python_repl import PythonREPL
 
@@ -104,6 +105,7 @@ def build_app_state(settings: Settings) -> dict:
     pdf_processor = PDFProcessorService()
     text_cleaner = TextCleanerService()
     chunker = ChunkerService(settings)
+    table_extractor = TableExtractorService(max_tokens=settings.chunk_size_tokens)
 
     ingestion_pipeline = IngestionPipeline(
         pdf_processor=pdf_processor,
@@ -114,6 +116,7 @@ def build_app_state(settings: Settings) -> dict:
         document_registry=document_registry,
         session_store=session_store,
         embedding_model=settings.embedding_model,
+        table_extractor=table_extractor,
     )
 
     return {

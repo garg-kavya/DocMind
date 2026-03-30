@@ -11,6 +11,7 @@ from app.schemas.metadata import IngestionMetadata
 from app.services.chunker import ChunkerService
 from app.services.embedder import EmbedderService
 from app.services.pdf_processor import PDFProcessorService
+from app.services.table_extractor import TableExtractorService
 from app.services.text_cleaner import TextCleanerService
 from app.utils.logging import get_logger
 from langsmith import traceable
@@ -30,6 +31,7 @@ class IngestionPipeline:
         document_registry: DocumentRegistry,
         session_store: SessionStore,
         embedding_model: str = "text-embedding-3-small",
+        table_extractor: TableExtractorService | None = None,
     ) -> None:
         self._pdf = pdf_processor
         self._cleaner = text_cleaner
@@ -39,6 +41,7 @@ class IngestionPipeline:
         self._registry = document_registry
         self._sessions = session_store
         self._embedding_model = embedding_model
+        self._table_extractor = table_extractor
 
     @traceable(name="pdf-ingestion", run_type="chain")
     async def run(
@@ -71,7 +74,23 @@ class IngestionPipeline:
             document_id=document_id,
             document_name=filename,
         )
-        logger.info("Created %d chunks", len(chunks), extra={"document_id": document_id})
+        logger.info("Created %d text chunks", len(chunks), extra={"document_id": document_id})
+
+        # Step 4b — Table extraction (pdfplumber; skipped if extractor not wired or file has no tables)
+        if self._table_extractor is not None:
+            table_chunks = self._table_extractor.extract(
+                file_path=file_path,
+                document_id=document_id,
+                document_name=filename,
+                start_index=len(chunks),
+            )
+            if table_chunks:
+                chunks = chunks + table_chunks
+                logger.info(
+                    "Added %d table chunk(s); total chunks: %d",
+                    len(table_chunks), len(chunks),
+                    extra={"document_id": document_id},
+                )
 
         if not chunks:
             await self._registry.update_status(
