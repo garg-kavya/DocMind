@@ -19,6 +19,7 @@ httpx==0.28.1
 python-jose[cryptography]==3.3.0
 bcrypt==4.3.0
 asyncpg==0.30.0
+aiosmtplib==5.1.0
 
 # pgvector — vectors stored in PostgreSQL (no separate DB needed)
 pgvector==0.3.6

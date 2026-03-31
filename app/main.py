@@ -55,6 +55,7 @@ async def lifespan(app: FastAPI):
     app.state.vector_store._pool = pg_pool
     app.state.user_store._pool = pg_pool
     app.state.token_blocklist._pool = pg_pool
+    app.state.password_reset_store._pool = pg_pool
 
     # Step 4: initialize schemas + restore persisted state
     await app.state.vector_store.initialize()
@@ -62,18 +63,21 @@ async def lifespan(app: FastAPI):
     await app.state.session_store.load_from_disk()
     await app.state.user_store.create_table()
     await app.state.token_blocklist.create_table()
+    await app.state.password_reset_store.create_table()
     logger.info("DocMind service started")
 
     # Background: periodic session cleanup + blocklist pruning
     async def _cleanup_loop():
         store = app.state.session_store
         blocklist = app.state.token_blocklist
+        reset_store = app.state.password_reset_store
         while True:
             await asyncio.sleep(settings.session_cleanup_interval_seconds)
             removed = await store.cleanup_expired()
             if removed:
                 logger.info("Cleaned up %d expired sessions", removed)
             await blocklist.cleanup_expired()
+            await reset_store.cleanup_expired()
 
     cleanup_task = asyncio.create_task(_cleanup_loop())
 

@@ -19,8 +19,20 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
     user_id: str
     email: str
+    name: str | None = None
 
 
 class UserMeResponse(BaseModel):
     user_id: str
     email: str
+    name: str | None = None
+    auth_provider: str = "email"
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str = Field(..., min_length=8)

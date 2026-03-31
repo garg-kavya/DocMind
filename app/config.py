@@ -75,6 +75,23 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = 60 * 24 * 365  # 1 year
 
+    # --- Google OAuth (optional — leave blank to disable) ---
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    google_redirect_uri: str = "http://localhost:8000/api/v1/auth/google/callback"
+
+    # --- SMTP / email (optional — leave blank to disable forgot-password emails) ---
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_from_name: str = "DocMind"
+    smtp_use_tls: bool = True
+
+    # --- App base URL (used in reset-password links) ---
+    app_base_url: str = "http://localhost:8000"
+
     # --- Server ---
     host: str = "0.0.0.0"
     port: int = 8000

@@ -11,6 +11,7 @@ from app.cache.response_cache import ResponseCache
 from app.chains.rag_chain import RAGChain
 from app.config import Settings, get_settings
 from app.db.document_registry import DocumentRegistry
+from app.db.password_reset_store import PasswordResetStore
 from app.db.pgvector_store import PGVectorStore
 from app.db.session_store import SessionStore
 from app.db.token_blocklist import TokenBlocklist
@@ -49,6 +50,7 @@ def build_app_state(settings: Settings) -> dict:
     # pool is injected later in main.py lifespan after asyncpg.create_pool()
     user_store = UserStore(pool=None)  # type: ignore[arg-type]
     token_blocklist = TokenBlocklist(pool=None)  # type: ignore[arg-type]
+    password_reset_store = PasswordResetStore(pool=None)  # type: ignore[arg-type]
 
     # Cache
     shared_cache = InMemoryCache(
@@ -126,6 +128,7 @@ def build_app_state(settings: Settings) -> dict:
         "document_registry": document_registry,
         "user_store": user_store,
         "token_blocklist": token_blocklist,
+        "password_reset_store": password_reset_store,
         "embedding_cache": embedding_cache,
         "response_cache": response_cache,
         "rag_pipeline": rag_pipeline,

@@ -301,6 +301,10 @@ async def test_client(tmp_path):
     _mock_pool.acquire = MagicMock(return_value=_mock_conn)
     _mock_pool.close = AsyncMock()
 
+    _mock_reset_store = AsyncMock()
+    _mock_reset_store.create_table = AsyncMock(return_value=None)
+    _mock_reset_store.cleanup_expired = AsyncMock(return_value=None)
+
     with patch("app.main.asyncpg.connect", new=AsyncMock(return_value=_mock_conn)), \
          patch("app.main.asyncpg.create_pool", new=AsyncMock(return_value=_mock_pool)), \
          patch("app.main.register_vector", new=AsyncMock()):
@@ -314,6 +318,7 @@ async def test_client(tmp_path):
         _app.dependency_overrides[_deps.get_rag_pipeline] = lambda: _rag_pipeline
         _app.dependency_overrides[_deps.get_ingestion_pipeline] = lambda: _ingestion_pipeline
         _app.dependency_overrides[_deps.get_current_user] = lambda: _test_user
+        _app.state.password_reset_store = _mock_reset_store
 
         async with AsyncClient(
             transport=ASGITransport(app=_app), base_url="http://test"
