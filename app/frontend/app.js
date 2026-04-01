@@ -162,23 +162,12 @@ async function handleLogout() {
     }
   } finally {
     clearAuth();
-    showAuthOverlay(null);
+    showAuthOverlay();
   }
 }
 
-// Show the auth overlay with an optional notice message.
-// Pass null for a clean show (e.g. normal logout).
-// Pass a string to display a banner (e.g. session expired).
-function showAuthOverlay(notice) {
-  const noticeEl = document.getElementById('authNotice');
-  if (notice) {
-    noticeEl.textContent = notice;
-    noticeEl.classList.remove('hidden');
-  } else {
-    noticeEl.textContent = '';
-    noticeEl.classList.add('hidden');
-  }
-  // Always land on Sign In tab
+// Silently show the auth overlay (login tab). No messages, no banners.
+function showAuthOverlay() {
   switchAuthTab('login');
   document.getElementById('mainApp').style.display = 'none';
   document.getElementById('authOverlay').style.display = 'flex';
@@ -186,9 +175,6 @@ function showAuthOverlay(notice) {
 
 async function showMainApp() {
   const auth = getAuth();
-  // Clear any session-expired notice
-  const noticeEl = document.getElementById('authNotice');
-  if (noticeEl) { noticeEl.textContent = ''; noticeEl.classList.add('hidden'); }
   document.getElementById('authOverlay').style.display = 'none';
   document.getElementById('mainApp').style.display = 'flex';
   if (auth) {
@@ -619,7 +605,7 @@ async function streamQuery(question, contentEl, rowEl) {
   });
   if (resp.status === 401) {
     clearAuth();
-    showAuthOverlay('Your session has expired. Sign in below -- your account and documents are still saved.');
+    showAuthOverlay();
     throw new Error('session-expired');
   }
   if (!resp.ok) {
@@ -887,7 +873,7 @@ async function apiFetch(path, method = 'GET', body = undefined) {
   const resp = await fetch(path, opts);
   if (resp.status === 401) {
     clearAuth();
-    showAuthOverlay('Your session has expired. Sign in below -- your account and documents are still saved.');
+    showAuthOverlay();
     throw new Error('session-expired');
   }
   if (!resp.ok) {

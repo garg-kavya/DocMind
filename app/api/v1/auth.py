@@ -66,9 +66,8 @@ async def login(
     user = await store.get_by_email(body.email)
     if not user:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password.",
-            headers={"WWW-Authenticate": "Bearer"},
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No account found with this email. Please sign up first.",
         )
     if user.auth_provider == "google" and not user.hashed_password:
         raise HTTPException(
@@ -77,9 +76,8 @@ async def login(
         )
     if not verify_password(body.password, user.hashed_password or ""):
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password.",
-            headers={"WWW-Authenticate": "Bearer"},
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Incorrect password. Please try again.",
         )
     token = create_access_token(user.user_id, user.email)
     return TokenResponse(access_token=token, user_id=user.user_id, email=user.email, name=user.name)
