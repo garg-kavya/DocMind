@@ -38,8 +38,22 @@ function switchAuthTab(tab) {
 }
 
 /* ─── Google OAuth ───────────────────────────────────── */
-function handleGoogleLogin() {
-  window.location.href = '/api/v1/auth/google';
+async function handleGoogleLogin() {
+  // Use redirect:'manual' so fetch doesn't follow the redirect itself.
+  // An opaqueredirect (status 0) means the server returned a real 302 → navigate.
+  // A status 501 means Google OAuth is not configured → show toast.
+  try {
+    const resp = await fetch('/api/v1/auth/google', { redirect: 'manual' });
+    if (resp.type === 'opaqueredirect' || resp.status === 0) {
+      window.location.href = '/api/v1/auth/google';
+    } else if (resp.status === 501) {
+      showToast('Google sign-in is not configured on this server.', 'error');
+    } else {
+      window.location.href = '/api/v1/auth/google';
+    }
+  } catch {
+    window.location.href = '/api/v1/auth/google';
+  }
 }
 
 /* ─── Forgot password modal ──────────────────────────── */
@@ -148,13 +162,33 @@ async function handleLogout() {
     }
   } finally {
     clearAuth();
-    document.getElementById('mainApp').style.display = 'none';
-    document.getElementById('authOverlay').style.display = 'flex';
+    showAuthOverlay(null);
   }
+}
+
+// Show the auth overlay with an optional notice message.
+// Pass null for a clean show (e.g. normal logout).
+// Pass a string to display a banner (e.g. session expired).
+function showAuthOverlay(notice) {
+  const noticeEl = document.getElementById('authNotice');
+  if (notice) {
+    noticeEl.textContent = notice;
+    noticeEl.classList.remove('hidden');
+  } else {
+    noticeEl.textContent = '';
+    noticeEl.classList.add('hidden');
+  }
+  // Always land on Sign In tab
+  switchAuthTab('login');
+  document.getElementById('mainApp').style.display = 'none';
+  document.getElementById('authOverlay').style.display = 'flex';
 }
 
 async function showMainApp() {
   const auth = getAuth();
+  // Clear any session-expired notice
+  const noticeEl = document.getElementById('authNotice');
+  if (noticeEl) { noticeEl.textContent = ''; noticeEl.classList.add('hidden'); }
   document.getElementById('authOverlay').style.display = 'none';
   document.getElementById('mainApp').style.display = 'flex';
   if (auth) {
@@ -556,6 +590,7 @@ async function sendMessage() {
     saveCurrentSession();
     renderChatHistory();
   } catch (err) {
+    if (err.message === 'session-expired') return; // auth overlay already shown
     // Clean up thinking dots if still visible
     const dots = assistantRow.querySelector('#thinkingDots');
     if (dots) dots.remove();
@@ -584,9 +619,8 @@ async function streamQuery(question, contentEl, rowEl) {
   });
   if (resp.status === 401) {
     clearAuth();
-    document.getElementById('mainApp').style.display = 'none';
-    document.getElementById('authOverlay').style.display = 'flex';
-    throw new Error('Your login has expired — please sign in again.');
+    showAuthOverlay('Your session has expired. Sign in below -- your account and documents are still saved.');
+    throw new Error('session-expired');
   }
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({}));
@@ -852,11 +886,9 @@ async function apiFetch(path, method = 'GET', body = undefined) {
   if (body !== undefined) opts.body = JSON.stringify(body);
   const resp = await fetch(path, opts);
   if (resp.status === 401) {
-    // Token expired or invalid — force re-login
     clearAuth();
-    document.getElementById('mainApp').style.display = 'none';
-    document.getElementById('authOverlay').style.display = 'flex';
-    throw new Error('Your login has expired — please sign in again.');
+    showAuthOverlay('Your session has expired. Sign in below -- your account and documents are still saved.');
+    throw new Error('session-expired');
   }
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({}));

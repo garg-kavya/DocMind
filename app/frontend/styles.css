@@ -162,6 +162,18 @@ input, textarea { font: inherit; }
   color: var(--text-secondary);
 }
 
+.auth-notice {
+  font-size: 13px;
+  font-weight: 500;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  margin-bottom: 4px;
+  text-align: center;
+  background: rgba(255, 169, 77, 0.12);
+  border: 1px solid rgba(255, 169, 77, 0.3);
+  color: #ffa94d;
+}
+
 /* Auth tabs */
 .auth-tabs {
   display: flex;
