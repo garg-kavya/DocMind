@@ -56,6 +56,67 @@ async function handleGoogleLogin() {
   }
 }
 
+/* ─── Reset password modal (from email link) ────────── */
+let _resetToken = '';
+
+function showResetModal(token) {
+  _resetToken = token;
+  document.getElementById('resetModal').classList.remove('hidden');
+  document.getElementById('resetPassword').value = '';
+  document.getElementById('resetPasswordConfirm').value = '';
+  document.getElementById('resetError').textContent = '';
+  document.getElementById('resetError').classList.add('hidden');
+  document.getElementById('resetSuccess').textContent = '';
+  document.getElementById('resetSuccess').classList.add('hidden');
+  document.getElementById('resetBtn').disabled = false;
+  document.getElementById('resetBtn').textContent = 'Set New Password';
+  setTimeout(() => document.getElementById('resetPassword').focus(), 50);
+}
+
+async function handleResetPassword(e) {
+  e.preventDefault();
+  const btn     = document.getElementById('resetBtn');
+  const errEl   = document.getElementById('resetError');
+  const succEl  = document.getElementById('resetSuccess');
+  const pw      = document.getElementById('resetPassword').value;
+  const pwConf  = document.getElementById('resetPasswordConfirm').value;
+
+  errEl.textContent = ''; errEl.classList.add('hidden');
+  succEl.textContent = ''; succEl.classList.add('hidden');
+
+  if (pw !== pwConf) {
+    errEl.textContent = 'Passwords do not match.';
+    errEl.classList.remove('hidden');
+    return;
+  }
+  if (pw.length < 8) {
+    errEl.textContent = 'Password must be at least 8 characters.';
+    errEl.classList.remove('hidden');
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    const data = await apiFetch('/api/v1/auth/reset-password', 'POST', {
+      token: _resetToken,
+      new_password: pw,
+    });
+    setAuth({ token: data.access_token, user_id: data.user_id, email: data.email, name: data.name || '' });
+    succEl.textContent = 'Password updated! Signing you in…';
+    succEl.classList.remove('hidden');
+    setTimeout(() => {
+      document.getElementById('resetModal').classList.add('hidden');
+      showMainApp();
+    }, 1500);
+  } catch (err) {
+    errEl.textContent = err.message;
+    errEl.classList.remove('hidden');
+    btn.disabled = false;
+    btn.textContent = 'Set New Password';
+  }
+}
+
 /* ─── Forgot password modal ──────────────────────────── */
 function showForgotPassword(e) {
   if (e) e.preventDefault();
@@ -243,7 +304,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   const urlParams = new URLSearchParams(window.location.search);
   const oauthToken = urlParams.get('access_token');
   const authError  = urlParams.get('auth_error');
-  if (oauthToken) {
+
+  // Handle password reset link: /reset-password?token=...
+  if (window.location.pathname === '/reset-password') {
+    const resetToken = urlParams.get('token');
+    history.replaceState({}, '', '/');
+    if (resetToken) {
+      showResetModal(resetToken);
+    } else {
+      showToast('Invalid reset link. Please request a new one.', 'error');
+    }
+  } else if (oauthToken) {
     setAuth({
       token:   oauthToken,
       user_id: urlParams.get('user_id') || '',
@@ -253,6 +324,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Clean URL without reload
     history.replaceState({}, '', window.location.pathname);
   } else if (authError) {
+    showToast('Google sign-in failed. Please try again.', 'error');
     history.replaceState({}, '', window.location.pathname);
   }
 

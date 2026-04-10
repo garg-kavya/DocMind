@@ -122,6 +122,13 @@ def create_app() -> FastAPI:
     # API routes
     app.include_router(api_router)
 
+    # SPA fallback — serve index.html for any unmatched path (e.g. /reset-password)
+    # Must be AFTER API routes so it never shadows them.
+    if os.path.isdir(_FRONTEND_DIR):
+        @app.get("/{full_path:path}", include_in_schema=False)
+        async def spa_fallback(full_path: str) -> FileResponse:
+            return FileResponse(os.path.join(_FRONTEND_DIR, "index.html"))
+
     # Static files LAST so /static/* never shadows API routes
     if os.path.isdir(_FRONTEND_DIR):
         app.mount("/static", StaticFiles(directory=_FRONTEND_DIR), name="frontend_static")
