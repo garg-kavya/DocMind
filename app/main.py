@@ -6,10 +6,10 @@ import os
 from contextlib import asynccontextmanager
 
 import asyncpg
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from pgvector.asyncpg import register_vector
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.middleware.error_handler import app_error_handler, generic_error_handler
@@ -122,16 +122,21 @@ def create_app() -> FastAPI:
     # API routes
     app.include_router(api_router)
 
-    # SPA fallback — serve index.html for any unmatched path (e.g. /reset-password)
-    # Must be AFTER API routes so it never shadows them.
-    if os.path.isdir(_FRONTEND_DIR):
-        @app.get("/{full_path:path}", include_in_schema=False)
-        async def spa_fallback(full_path: str) -> FileResponse:
-            return FileResponse(os.path.join(_FRONTEND_DIR, "index.html"))
-
-    # Static files LAST so /static/* never shadows API routes
+    # Static files — must come before the 404 handler below
     if os.path.isdir(_FRONTEND_DIR):
         app.mount("/static", StaticFiles(directory=_FRONTEND_DIR), name="frontend_static")
+
+    # SPA fallback — use a 404 handler so static files and API routes are never intercepted.
+    # Routes always win over mounts in FastAPI, so a catch-all GET route would shadow /static/*.
+    # A 404 handler fires only when nothing else matched, which is exactly what we want.
+    if os.path.isdir(_FRONTEND_DIR):
+        @app.exception_handler(404)
+        async def spa_fallback(request: Request, exc: Exception) -> FileResponse | JSONResponse:
+            path = request.url.path
+            # Let API and static 404s return JSON so they're machine-readable
+            if path.startswith("/api/") or path.startswith("/static/"):
+                return JSONResponse({"detail": "Not found"}, status_code=404)
+            return FileResponse(os.path.join(_FRONTEND_DIR, "index.html"))
 
     return app
 
