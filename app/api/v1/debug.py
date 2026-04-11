@@ -3,11 +3,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
 
-from app.cache.embedding_cache import EmbeddingCache
 from app.db.document_registry import DocumentRegistry
 from app.db.vector_store import VectorStore
-from app.dependencies import get_document_registry, get_vector_store
-from app.config import Settings
+from app.dependencies import get_document_registry, get_embedder, get_settings, get_vector_store
+from app.services.embedder import EmbedderService
 
 router = APIRouter(tags=["debug"])
 
@@ -45,17 +44,12 @@ async def debug_search(
     q: str = Query(..., description="Query text to test similarity"),
     doc_id: str = Query(None, description="Filter by document_id (optional)"),
     vector_store: VectorStore = Depends(get_vector_store),
+    embedder: EmbedderService = Depends(get_embedder),
+    settings=Depends(get_settings),
 ):
     """Embed a query and show raw similarity scores from FAISS."""
-    from fastapi import Request
     from app.db.faiss_store import FAISSStore
-    from app.services.embedder import EmbedderService
 
-    # We need the request to get app.state for settings and embedding_cache
-    # Use a workaround: instantiate embedder from env
-    from app.config import get_settings
-    settings = get_settings()
-    embedder = EmbedderService(settings)
     embedding = await embedder.embed_query(q)
 
     doc_ids = [doc_id] if doc_id else None

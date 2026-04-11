@@ -9,6 +9,7 @@ from app.cache.response_cache import ResponseCache
 from app.db.document_registry import DocumentRegistry
 from app.db.session_store import SessionStore
 from app.dependencies import get_current_user, get_document_registry, get_response_cache, get_session_store
+from fastapi import HTTPException, status
 from app.exceptions import SessionNotFoundError
 from app.models.user import User
 from app.schemas.session import (
@@ -35,7 +36,7 @@ async def create_session(
         # never forces re-upload when the previous session expires.
         user_docs = await registry.get_by_user(current_user.user_id, status="ready")
         doc_ids = [d.document_id for d in user_docs]
-    session = await store.create_session(doc_ids)
+    session = await store.create_session(doc_ids, user_id=current_user.user_id)
     expires_at = store.expires_at(session)
     return SessionCreateResponse(
         session_id=session.session_id,
@@ -53,7 +54,7 @@ async def get_session(
     current_user: User = Depends(get_current_user),
 ):
     session = await store.get_session(session_id)
-    if session is None:
+    if session is None or (session.user_id is not None and session.user_id != current_user.user_id):
         raise SessionNotFoundError(f"Session {session_id} not found or expired.")
     expires_at = store.expires_at(session)
     history = [
@@ -62,7 +63,16 @@ async def get_session(
             user_query=t.user_query,
             standalone_query=t.standalone_query,
             assistant_response=t.assistant_response,
-            citations=[],
+            citations=[
+                {
+                    "document_name": c.document_name,
+                    "page_numbers": c.page_numbers,
+                    "chunk_index": c.chunk_index,
+                    "chunk_id": c.chunk_id,
+                    "excerpt": c.excerpt,
+                }
+                for c in t.citations
+            ],
             timestamp=t.timestamp,
         )
         for i, t in enumerate(session.conversation_history)
@@ -85,6 +95,10 @@ async def delete_session(
     response_cache: ResponseCache = Depends(get_response_cache),
     current_user: User = Depends(get_current_user),
 ):
+    # Ownership check before delete
+    existing = await store.get_session(session_id)
+    if existing is None or (existing.user_id is not None and existing.user_id != current_user.user_id):
+        raise SessionNotFoundError(f"Session {session_id} not found.")
     turns_cleared = await store.delete_session(session_id)
     if turns_cleared is None:
         raise SessionNotFoundError(f"Session {session_id} not found.")

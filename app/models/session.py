@@ -27,6 +27,7 @@ class ConversationTurn:
 class Session:
     document_ids: list[str]
     session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str | None = None
     conversation_history: list[ConversationTurn] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.utcnow)
     last_active_at: datetime = field(default_factory=datetime.utcnow)

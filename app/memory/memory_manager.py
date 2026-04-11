@@ -1,6 +1,9 @@
 """Memory Manager — orchestrates history read/write for RAGPipeline."""
 from __future__ import annotations
 
+import asyncio
+from collections import defaultdict
+
 from app.db.session_store import SessionStore
 from app.memory.context_builder import ContextBuilder
 from app.memory.memory_compressor import MemoryCompressor
@@ -22,6 +25,9 @@ class MemoryManager:
         self._store = session_store
         self._builder = context_builder
         self._compressor = compressor
+        # Per-session lock prevents concurrent record_turn calls from racing
+        # on the update→compress→replace sequence.
+        self._session_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     async def get_formatted_history(
         self,
@@ -49,11 +55,11 @@ class MemoryManager:
             retrieved_chunk_ids=retrieved_chunk_ids,
             citations=citations,
         )
-        session = await self._store.update_session(session_id, turn)
-
-        if self._compressor.should_compress(session.turn_count):
-            compressed = await self._compressor.compress(session.conversation_history)
-            await self._store.replace_history(session_id, compressed)
+        async with self._session_locks[session_id]:
+            session = await self._store.update_session(session_id, turn)
+            if self._compressor.should_compress(session.turn_count):
+                compressed = await self._compressor.compress(session.conversation_history)
+                await self._store.replace_history(session_id, compressed)
 
     async def get_turn_count(self, session_id: str) -> int:
         session = await self._store.get_session(session_id)

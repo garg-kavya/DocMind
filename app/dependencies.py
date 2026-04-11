@@ -129,6 +129,7 @@ def build_app_state(settings: Settings) -> dict:
         "user_store": user_store,
         "token_blocklist": token_blocklist,
         "password_reset_store": password_reset_store,
+        "embedder": embedder,
         "embedding_cache": embedding_cache,
         "response_cache": response_cache,
         "rag_pipeline": rag_pipeline,
@@ -174,6 +175,10 @@ def get_user_store(request: Request) -> UserStore:
 
 def get_token_blocklist(request: Request) -> TokenBlocklist:
     return request.app.state.token_blocklist
+
+
+def get_embedder(request: Request) -> EmbedderService:
+    return request.app.state.embedder
 
 
 async def get_current_user(

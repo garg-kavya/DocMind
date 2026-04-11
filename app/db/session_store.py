@@ -31,8 +31,8 @@ class SessionStore:
     # Public interface
     # ------------------------------------------------------------------
 
-    async def create_session(self, document_ids: list[str]) -> Session:
-        session = Session(document_ids=list(document_ids))
+    async def create_session(self, document_ids: list[str], user_id: str | None = None) -> Session:
+        session = Session(document_ids=list(document_ids), user_id=user_id)
         async with self._lock:
             self._sessions[session.session_id] = session
         logger.info("Created session %s", session.session_id)
@@ -174,6 +174,7 @@ class SessionStore:
 
         return {
             "session_id": session.session_id,
+            "user_id": session.user_id,
             "document_ids": session.document_ids,
             "conversation_history": [turn_to_dict(t) for t in session.conversation_history],
             "created_at": session.created_at.isoformat(),
@@ -208,6 +209,7 @@ class SessionStore:
 
         session = Session.__new__(Session)
         session.session_id = d["session_id"]
+        session.user_id = d.get("user_id")
         session.document_ids = d["document_ids"]
         session.conversation_history = [dict_to_turn(t) for t in d.get("conversation_history", [])]
         session.created_at = datetime.fromisoformat(d["created_at"])

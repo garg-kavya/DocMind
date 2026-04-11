@@ -1,6 +1,7 @@
 """Token-bucket rate limiting middleware."""
 from __future__ import annotations
 
+import asyncio
 import time
 from collections import defaultdict
 
@@ -22,6 +23,7 @@ class RateLimiterMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         # {(client_ip, path_prefix): [timestamps]}
         self._buckets: dict[tuple, list[float]] = defaultdict(list)
+        self._lock = asyncio.Lock()
 
     async def dispatch(self, request: Request, call_next):
         client_ip = request.client.host if request.client else "unknown"
@@ -41,20 +43,21 @@ class RateLimiterMiddleware(BaseHTTPMiddleware):
         key = (client_ip, prefix)
         now = time.monotonic()
 
-        # Slide window
-        timestamps = [t for t in self._buckets[key] if now - t < _WINDOW]
-        if len(timestamps) >= limit:
-            retry_after = int(_WINDOW - (now - timestamps[0])) + 1
-            return JSONResponse(
-                status_code=429,
-                content={"detail": f"Rate limit exceeded. Try again in {retry_after}s."},
-                headers={
-                    "Retry-After": str(retry_after),
-                    "X-RateLimit-Limit": str(limit),
-                    "X-RateLimit-Remaining": "0",
-                },
-            )
+        async with self._lock:
+            # Slide window
+            timestamps = [t for t in self._buckets[key] if now - t < _WINDOW]
+            if len(timestamps) >= limit:
+                retry_after = int(_WINDOW - (now - timestamps[0])) + 1
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": f"Rate limit exceeded. Try again in {retry_after}s."},
+                    headers={
+                        "Retry-After": str(retry_after),
+                        "X-RateLimit-Limit": str(limit),
+                        "X-RateLimit-Remaining": "0",
+                    },
+                )
+            timestamps.append(now)
+            self._buckets[key] = timestamps
 
-        timestamps.append(now)
-        self._buckets[key] = timestamps
         return await call_next(request)

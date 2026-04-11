@@ -41,22 +41,26 @@ async def upload_document(
     settings=Depends(get_settings),
     current_user: User = Depends(get_current_user),
 ):
-    if not file.content_type or "pdf" not in file.content_type.lower():
-        # Allow even if content_type isn't set — validate_pdf via magic bytes
-        pass
+    if file.content_type and "pdf" not in file.content_type.lower():
+        raise InvalidFileTypeError("Only PDF files are accepted.")
 
-    file_path, document_id = await save_upload(
-        file, settings.upload_dir, settings.max_upload_size_mb
-    )
-
-    file_size = os.path.getsize(file_path)
-    doc = await registry.register(
-        document_id=document_id,
-        filename=file.filename or "upload.pdf",
-        file_path=file_path,
-        file_size_bytes=file_size,
-        user_id=current_user.user_id,
-    )
+    file_path: str | None = None
+    try:
+        file_path, document_id = await save_upload(
+            file, settings.upload_dir, settings.max_upload_size_mb
+        )
+        file_size = os.path.getsize(file_path)
+        doc = await registry.register(
+            document_id=document_id,
+            filename=file.filename or "upload.pdf",
+            file_path=file_path,
+            file_size_bytes=file_size,
+            user_id=current_user.user_id,
+        )
+    except Exception:
+        if file_path and os.path.exists(file_path):
+            os.unlink(file_path)
+        raise
 
     background_tasks.add_task(
         pipeline.run,

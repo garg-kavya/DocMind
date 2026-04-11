@@ -98,6 +98,17 @@ class Settings(BaseSettings):
     workers: int = 1
     cors_origins: list[str] = ["*"]
 
+    @field_validator("jwt_secret_key")
+    @classmethod
+    def _validate_jwt_secret(cls, v: str) -> str:
+        if v == "change-me-in-production-use-a-long-random-string":
+            import os
+            if os.environ.get("ENVIRONMENT", "").lower() == "production":
+                raise ValueError("JWT_SECRET_KEY must be changed from the default in production.")
+        if len(v) < 32:
+            raise ValueError("JWT_SECRET_KEY must be at least 32 characters.")
+        return v
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def parse_cors(cls, v: object) -> list[str]:

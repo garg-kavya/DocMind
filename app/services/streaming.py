@@ -14,22 +14,29 @@ class StreamingHandler:
     @staticmethod
     def create_stream_response(
         token_generator: AsyncGenerator[StreamingChunk, None],
-        query_id: str,
+        query_id: str | None = None,
     ) -> StreamingResponse:
-        """Wrap an async generator of StreamingChunk into a FastAPI SSE response."""
+        """Wrap an async generator of StreamingChunk into a FastAPI SSE response.
+
+        query_id is omitted from headers — it is emitted in the 'done' SSE event body
+        where it is available after the pipeline has assigned it.
+        """
 
         async def event_stream() -> AsyncGenerator[str, None]:
             async for chunk in token_generator:
                 yield StreamingHandler.format_sse_event(chunk.event, chunk.data)
 
+        headers: dict[str, str] = {
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        }
+        if query_id is not None:
+            headers["X-Query-Id"] = query_id
+
         return StreamingResponse(
             event_stream(),
             media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Query-Id": query_id,
-            },
+            headers=headers,
         )
 
     @staticmethod

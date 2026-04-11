@@ -92,8 +92,6 @@ async def query_stream(
     pipeline: RAGPipeline = Depends(get_rag_pipeline),
     current_user: User = Depends(get_current_user),
 ) -> StreamingResponse:
-    query_id_holder: list[str] = ["unknown"]
-
     async def _gen():
         async for chunk in pipeline.run_stream(
             raw_query=body.question,
@@ -101,11 +99,6 @@ async def query_stream(
             document_ids=body.document_ids,
             top_k=body.top_k,
         ):
-            if chunk.event == "done":
-                query_id_holder[0] = chunk.data.get("query_id", "unknown")
             yield chunk
 
-    return StreamingHandler.create_stream_response(
-        token_generator=_gen(),
-        query_id=query_id_holder[0],
-    )
+    return StreamingHandler.create_stream_response(token_generator=_gen())

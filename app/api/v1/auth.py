@@ -120,7 +120,7 @@ async def google_callback(
         return RedirectResponse(url=f"{base_url}/?auth_error={error or 'cancelled'}")
 
     # Exchange code for tokens
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=10.0) as client:
         token_resp = await client.post(
             _GOOGLE_TOKEN_URL,
             data={
@@ -235,7 +235,7 @@ async def reset_password(
 
     user = await store.get_by_id(user_id)
     if user is None:
-        raise HTTPException(status_code=500, detail="User not found after password reset.")
+        raise HTTPException(status_code=500, detail="Internal error: user record missing after password reset.")
 
     token = create_access_token(user.user_id, user.email)
     return TokenResponse(access_token=token, user_id=user.user_id, email=user.email, name=user.name)

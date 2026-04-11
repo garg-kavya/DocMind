@@ -1,7 +1,7 @@
 """PostgreSQL-backed JWT token blocklist for stateless logout."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import asyncpg
 
@@ -45,7 +45,7 @@ class TokenBlocklist:
         """Delete blocklist entries whose tokens have already expired naturally."""
         async with self._pool.acquire() as conn:
             result = await conn.execute(
-                "DELETE FROM token_blocklist WHERE expires_at < $1", datetime.utcnow()
+                "DELETE FROM token_blocklist WHERE expires_at < $1", datetime.now(timezone.utc)
             )
         # asyncpg returns "DELETE N" as a status string
         try:
