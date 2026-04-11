@@ -55,6 +55,9 @@ export default function ChatApp({ onLogout, showToast }) {
   const fileInputRef = useRef(null)
   const uploadZoneRef = useRef(null)
 
+  // sidebar open state (mobile)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+
   // history sidebar re-render trigger
   const [historyVersion, setHistoryVersion] = useState(0)
 
@@ -70,7 +73,6 @@ export default function ChatApp({ onLogout, showToast }) {
         const saved = s.sessions[s.currentId]
         await loadSession(saved.id, false)
       } else {
-        // Still refresh doc statuses for sidebar
         await refreshDocStatuses()
       }
       setHistoryVersion(v => v + 1)
@@ -88,6 +90,13 @@ export default function ChatApp({ onLogout, showToast }) {
   }, [session])
 
   useEffect(() => { scrollToBottom() }, [session.messages, isStreaming, scrollToBottom])
+
+  // Close sidebar on resize to desktop
+  useEffect(() => {
+    function onResize() { if (window.innerWidth > 768) setSidebarOpen(false) }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
 
   /* ── Doc library refresh ── */
   async function refreshDocStatuses() {
@@ -143,7 +152,6 @@ export default function ChatApp({ onLogout, showToast }) {
     const saved = s.sessions[localId]
     if (!saved) return
 
-    // Verify backend session alive
     let backendAlive = false
     if (saved.sessionId) {
       try {
@@ -163,9 +171,9 @@ export default function ChatApp({ onLogout, showToast }) {
     setSession(newSess)
 
     if (!backendAlive) {
-      // Try auto-renew
       await autoRenewSession(newSess.docStatuses)
     }
+    setSidebarOpen(false)
     setHistoryVersion(v => v + 1)
   }
 
@@ -177,6 +185,7 @@ export default function ChatApp({ onLogout, showToast }) {
     s.currentId = fresh.id
     setStore(s)
     setSession(fresh)
+    setSidebarOpen(false)
     setHistoryVersion(v => v + 1)
   }
 
@@ -195,7 +204,6 @@ export default function ChatApp({ onLogout, showToast }) {
       return
     }
 
-    // Ensure we have a backend session
     let sid = session.sessionId
     if (!sid) {
       try {
@@ -220,7 +228,6 @@ export default function ChatApp({ onLogout, showToast }) {
           ...prev.docStatuses,
           [docId]: { name: file.name, status: 'processing' },
         },
-        // Set title from first doc if still default
         title: prev.title === 'New Chat' ? file.name.replace(/\.pdf$/i, '') : prev.title,
       }))
       showToast('Uploaded — processing…')
@@ -328,7 +335,7 @@ export default function ChatApp({ onLogout, showToast }) {
     setInputValue(e.target.value)
     const el = e.target
     el.style.height = 'auto'
-    el.style.height = Math.min(el.scrollHeight, 160) + 'px'
+    el.style.height = Math.min(el.scrollHeight, 180) + 'px'
   }
 
   function useExample(text) {
@@ -360,78 +367,77 @@ export default function ChatApp({ onLogout, showToast }) {
   const userInitial = (auth?.name || auth?.email || 'U').charAt(0).toUpperCase()
   const userDisplay = auth?.name || auth?.email || ''
 
-  /* ── Chat history list ── */
   const allSessions = Object.values(getStore().sessions).sort(
     (a, b) => new Date(b.lastActiveAt) - new Date(a.lastActiveAt)
   )
 
   return (
-    <div className="app">
+    <div className="app-shell">
+
+      {/* ── Mobile sidebar overlay ── */}
+      {sidebarOpen && (
+        <div className="sidebar-overlay" onClick={() => setSidebarOpen(false)} />
+      )}
+
       {/* ── Sidebar ── */}
-      <aside className="sidebar">
-        <div className="sidebar-top">
-          <div className="logo">
-            <div className="logo-mark-sm">D</div>
-            <span className="logo-text">DocMind</span>
+      <aside className={`sidebar${sidebarOpen ? ' open' : ''}`}>
+        <div className="sidebar-header">
+          <div className="sidebar-logo">
+            <div className="logo-mark">D</div>
+            <span className="logo-wordmark">DocMind</span>
           </div>
           <button className="btn-new-chat" onClick={newChat} title="New Chat">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
               <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
             </svg>
-            New Chat
           </button>
         </div>
 
         {/* Recent chats */}
-        <div className="sidebar-section">
-          <div className="sidebar-section-label">Recent Chats</div>
-          <div className="chat-history-list">
-            {allSessions.length === 0 ? (
-              <div className="no-history">No chats yet</div>
-            ) : allSessions.map(sess => {
-              const isActive = sess.id === session.id
-              const preview = sess.messages.find(m => m.role === 'user')?.text?.slice(0, 45) || 'No messages yet'
-              return (
-                <div
-                  key={sess.id}
-                  className={`chat-history-item${isActive ? ' active' : ''}`}
-                  onClick={() => loadSession(sess.id)}
+        <div className="session-list-wrap">
+          <div className="session-section-label">Recent Chats</div>
+          {allSessions.length === 0 ? (
+            <div className="session-empty">No chats yet.<br/>Upload a PDF to get started.</div>
+          ) : allSessions.map(sess => {
+            const isActive = sess.id === session.id
+            return (
+              <div
+                key={sess.id}
+                className={`session-item${isActive ? ' active' : ''}`}
+                onClick={() => loadSession(sess.id)}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                </svg>
+                <span title={sess.title}>{sess.title}</span>
+                <button
+                  className="session-delete"
+                  title="Delete"
+                  onClick={e => deleteSession(e, sess.id)}
                 >
-                  <div className="chi-icon">💬</div>
-                  <div className="chi-body">
-                    <div className="chi-title">{sess.title}</div>
-                    <div className="chi-preview">{preview}</div>
-                    <div className="chi-time">{relativeTime(sess.lastActiveAt)}</div>
-                  </div>
-                  <button
-                    className="chi-delete"
-                    title="Delete"
-                    onClick={e => deleteSession(e, sess.id)}
-                  >✕</button>
-                </div>
-              )
-            })}
-          </div>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                    <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                  </svg>
+                </button>
+              </div>
+            )
+          })}
         </div>
-
-        <div className="sidebar-divider"></div>
 
         {/* Upload */}
         <div className="sidebar-section">
-          <div className="sidebar-section-label">Upload Document</div>
+          <div className="sidebar-section-title">Documents</div>
           <div
             ref={uploadZoneRef}
             className="upload-zone"
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
-            onClick={e => { if (e.target === e.currentTarget || e.target.closest('.upload-zone') === e.currentTarget) fileInputRef.current?.click() }}
           >
             <input
               ref={fileInputRef}
               type="file"
               accept=".pdf"
-              style={{ display: 'none' }}
               onChange={e => {
                 const file = e.target.files[0]
                 if (file) handleUpload(file)
@@ -439,41 +445,31 @@ export default function ChatApp({ onLogout, showToast }) {
               }}
             />
             <div className="upload-icon">
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                 <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
                 <polyline points="14 2 14 8 20 8"/>
                 <line x1="12" y1="18" x2="12" y2="12"/>
                 <line x1="9" y1="15" x2="15" y2="15"/>
               </svg>
             </div>
-            <p className="upload-label">Drop PDF here or</p>
-            <button className="btn-browse" onClick={() => fileInputRef.current?.click()} type="button">
-              Browse file
-            </button>
+            <div className="upload-text">
+              <strong>Drop PDF</strong> or click to browse
+            </div>
           </div>
 
-          {/* Doc list */}
           <div className="doc-list">
             {Object.entries(session.docStatuses).map(([id, info]) => (
-              <div className="doc-card" key={id}>
-                <div className="doc-card-icon">📄</div>
-                <div className="doc-card-info">
-                  <div className="doc-card-name" title={info.name}>{info.name}</div>
-                  <div className="doc-card-meta">{info.pages ? `${info.pages} page(s)` : ''}</div>
-                  {info.status === 'processing' && (
-                    <span className="doc-status-badge processing">
-                      <span className="spinner"></span> Processing
-                    </span>
-                  )}
-                  {info.status === 'ready' && (
-                    <span className="doc-status-badge ready">
-                      ✓ Ready · {info.chunks || '?'} chunks
-                    </span>
-                  )}
-                  {info.status === 'error' && (
-                    <span className="doc-status-badge error">✗ Error</span>
-                  )}
+              <div className="doc-item" key={id}>
+                <div className="doc-icon">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                    <polyline points="14 2 14 8 20 8"/>
+                  </svg>
                 </div>
+                <span className="doc-name" title={info.name}>{info.name}</span>
+                <span className={`doc-status ${info.status === 'ready' ? 'ready' : info.status === 'error' ? 'error' : 'indexing'}`}>
+                  {info.status === 'ready' ? '✓' : info.status === 'error' ? '✗' : '…'}
+                </span>
               </div>
             ))}
           </div>
@@ -481,104 +477,111 @@ export default function ChatApp({ onLogout, showToast }) {
 
         {/* Footer */}
         <div className="sidebar-footer">
-          <div className="footer-user-info">
-            <div className="footer-avatar">{userInitial}</div>
-            <div className="footer-user-text">
-              <span className="footer-user-email">{userDisplay}</span>
+          <div className="user-row">
+            <div className="user-avatar">{userInitial}</div>
+            <div className="user-info">
+              <div className="user-email" title={userDisplay}>{userDisplay}</div>
             </div>
-          </div>
-          <button className="btn-signout" onClick={handleLogout} title="Sign out">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
-              <polyline points="16 17 21 12 16 7"/>
-              <line x1="21" y1="12" x2="9" y2="12"/>
-            </svg>
-          </button>
-        </div>
-      </aside>
-
-      {/* ── Chat main ── */}
-      <main className="chat-main">
-        <div className="chat-messages">
-          {/* Welcome screen */}
-          {session.messages.length === 0 && !isStreaming && (
-            <div className="welcome" id="welcomeScreen">
-              <div className="welcome-graphic">
-                <div className="welcome-icon-ring">
-                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                    <polyline points="14 2 14 8 20 8"/>
-                    <line x1="16" y1="13" x2="8" y2="13"/>
-                    <line x1="16" y1="17" x2="8" y2="17"/>
-                    <polyline points="10 9 9 9 8 9"/>
-                  </svg>
-                </div>
-              </div>
-              <h2 className="welcome-title">Ask anything about your PDF</h2>
-              <p className="welcome-sub">Upload a document in the sidebar, then ask away.</p>
-              <div className="example-queries">
-                {EXAMPLE_QUERIES.map(q => (
-                  <button key={q} className="example-chip" onClick={() => useExample(q)} type="button">
-                    {q}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Messages */}
-          {session.messages.map((msg, i) => (
-            <Message
-              key={i}
-              role={msg.role}
-              text={msg.text}
-              citations={msg.citations}
-              confidence={msg.confidence}
-            />
-          ))}
-
-          {/* Streaming / thinking */}
-          {isLoading && !isStreaming && <ThinkingMessage />}
-          {isStreaming && streamingTokens === '' && <ThinkingMessage />}
-          {isStreaming && streamingTokens !== '' && (
-            <StreamingMessage
-              tokens={streamingTokens}
-              citations={streamingCitations}
-              confidence={streamingConfidence}
-            />
-          )}
-
-          <div ref={messagesEndRef} />
-        </div>
-
-        {/* Input bar */}
-        <div className="input-area">
-          <div className="input-bar">
-            <textarea
-              ref={textareaRef}
-              className="message-textarea"
-              placeholder={chatEnabled ? 'Ask a question about your document…' : 'Upload a PDF to start chatting…'}
-              rows={1}
-              disabled={isLoading || !chatEnabled}
-              value={inputValue}
-              onChange={handleInputChange}
-              onKeyDown={handleKey}
-            />
-            <button
-              id="sendBtn"
-              className="send-btn"
-              onClick={sendMessage}
-              disabled={isLoading || !chatEnabled || !inputValue.trim()}
-              title="Send (Enter)"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+            <button className="btn-logout" onClick={handleLogout} title="Sign out">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+                <polyline points="16 17 21 12 16 7"/>
+                <line x1="21" y1="12" x2="9" y2="12"/>
               </svg>
             </button>
           </div>
-          <p className="input-hint">Responses are grounded in your uploaded document.</p>
         </div>
-      </main>
+      </aside>
+
+      {/* ── Main Content ── */}
+      <div className="main-content">
+
+        {/* Mobile top bar */}
+        <div className="topbar">
+          <button className="btn-hamburger" onClick={() => setSidebarOpen(o => !o)} aria-label="Open menu">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <line x1="3" y1="6" x2="21" y2="6"/>
+              <line x1="3" y1="12" x2="21" y2="12"/>
+              <line x1="3" y1="18" x2="21" y2="18"/>
+            </svg>
+          </button>
+          <span className="topbar-title">{session.title}</span>
+        </div>
+
+        {/* Chat area */}
+        <div className="chat-area">
+          <div className="chat-inner">
+            {/* Welcome screen */}
+            {session.messages.length === 0 && !isStreaming && (
+              <div className="welcome-screen">
+                <div className="welcome-logo">D</div>
+                <h2 className="welcome-title">Ask anything about your PDF</h2>
+                <p className="welcome-sub">Upload a document in the sidebar, then start asking questions. Answers are grounded in your document.</p>
+                <div className="welcome-hints">
+                  {EXAMPLE_QUERIES.map(q => (
+                    <button key={q} className="welcome-hint" onClick={() => useExample(q)} type="button">
+                      {q}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Messages */}
+            <div className="messages-list">
+              {session.messages.map((msg, i) => (
+                <Message
+                  key={i}
+                  role={msg.role}
+                  text={msg.text}
+                  citations={msg.citations}
+                  confidence={msg.confidence}
+                />
+              ))}
+
+              {isLoading && !isStreaming && <ThinkingMessage />}
+              {isStreaming && streamingTokens === '' && <ThinkingMessage />}
+              {isStreaming && streamingTokens !== '' && (
+                <StreamingMessage
+                  tokens={streamingTokens}
+                  citations={streamingCitations}
+                  confidence={streamingConfidence}
+                />
+              )}
+
+              <div ref={messagesEndRef} />
+            </div>
+          </div>
+        </div>
+
+        {/* Input area */}
+        <div className="input-area">
+          <div className="input-inner">
+            <div className="input-box">
+              <textarea
+                ref={textareaRef}
+                placeholder={chatEnabled ? 'Ask a question about your document…' : 'Upload a PDF to start chatting…'}
+                rows={1}
+                disabled={isLoading || !chatEnabled}
+                value={inputValue}
+                onChange={handleInputChange}
+                onKeyDown={handleKey}
+              />
+              <button
+                className="btn-send"
+                onClick={sendMessage}
+                disabled={isLoading || !chatEnabled || !inputValue.trim()}
+                title="Send (Enter)"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                </svg>
+              </button>
+            </div>
+            <div className="input-footer">Answers grounded in your uploaded document</div>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }

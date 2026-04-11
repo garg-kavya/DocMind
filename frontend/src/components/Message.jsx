@@ -8,30 +8,23 @@ function renderMarkdown(text) {
   return DOMPurify.sanitize(marked.parse(text || ''))
 }
 
-/* ── Citations collapsible ── */
+/* ── Citations ── */
 function Citations({ citations }) {
-  const [open, setOpen] = useState(false)
   if (!citations || citations.length === 0) return null
   return (
-    <div className="citations">
-      <button className="citations-toggle" onClick={() => setOpen(o => !o)}>
-        <span>📎</span> {citations.length} Source{citations.length > 1 ? 's' : ''} {open ? '▲' : ''}
-      </button>
-      {open && (
-        <div className="citations-list">
-          {citations.map((c, i) => {
-            const pages = (c.page_numbers || []).join(', ')
-            return (
-              <div className="citation-item" key={i}>
-                <div className="citation-source">
-                  Source {i + 1} — {c.document_name}{pages ? `, p. ${pages}` : ''}
-                </div>
-                <div className="citation-excerpt">"{(c.excerpt || '').trim()}"</div>
-              </div>
-            )
-          })}
-        </div>
-      )}
+    <div className="citations-block">
+      <div className="citations-label">{citations.length} Source{citations.length > 1 ? 's' : ''}</div>
+      <div className="citations-chips">
+        {citations.map((c, i) => {
+          const pages = (c.page_numbers || []).join(', ')
+          return (
+            <div className="citation-chip" key={i} title={c.excerpt || ''}>
+              <span className="citation-chip-doc">[{i + 1}]</span>
+              {c.document_name}{pages ? ` · p. ${pages}` : ''}
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }
@@ -40,11 +33,11 @@ function Citations({ citations }) {
 function ConfidenceBadge({ score }) {
   if (score === null || score === undefined) return null
   const pct = Math.round(score * 100)
-  const cls = score >= 0.65 ? 'conf-high' : score >= 0.4 ? 'conf-medium' : 'conf-low'
-  const label = score >= 0.65 ? 'High' : score >= 0.4 ? 'Medium' : 'Low'
+  const color = score >= 0.65 ? 'var(--accent)' : score >= 0.4 ? 'var(--warning)' : 'var(--danger)'
   return (
-    <div className="confidence-badge">
-      <span className={`conf-dot ${cls}`}></span> Confidence: {label} ({pct}%)
+    <div style={{ fontSize: '11px', color: 'var(--text-faint)', marginTop: '10px', paddingLeft: '38px' }}>
+      <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: color, marginRight: 5, verticalAlign: 'middle' }} />
+      Confidence {pct}%
     </div>
   )
 }
@@ -52,38 +45,38 @@ function ConfidenceBadge({ score }) {
 /* ── Thinking dots ── */
 export function ThinkingMessage() {
   return (
-    <div className="msg-row assistant">
-      <div className="msg-avatar">D</div>
-      <div className="msg-bubble">
+    <div className="message-row assistant">
+      <div className="message-header">
+        <div className="msg-avatar ai-av">D</div>
+      </div>
+      <div className="message-bubble">
         <div className="thinking-dots">
-          <span></span><span></span><span></span>
+          <span /><span /><span />
         </div>
       </div>
     </div>
   )
 }
 
-/* ── Streaming message — receives tokens in real time ── */
+/* ── Streaming message ── */
 export function StreamingMessage({ tokens, citations, confidence }) {
   const contentRef = useRef(null)
-  const rawRef = useRef('')
 
   useEffect(() => {
-    rawRef.current = tokens
     if (contentRef.current) {
-      // During streaming show raw text with cursor; after streaming render markdown
       contentRef.current.textContent = tokens
     }
   }, [tokens])
 
   return (
-    <div className="msg-row assistant">
-      <div className="msg-avatar">D</div>
-      <div className="msg-bubble">
-        <div
-          className="msg-content typing-cursor"
-          ref={contentRef}
-        />
+    <div className="message-row assistant">
+      <div className="message-header">
+        <div className="msg-avatar ai-av">D</div>
+        <span className="msg-role">DocMind</span>
+      </div>
+      <div className="message-bubble">
+        <div className="md-body" ref={contentRef} />
+        <span className="stream-cursor" />
         {citations && citations.length > 0 && <Citations citations={citations} />}
         {confidence !== null && confidence !== undefined && <ConfidenceBadge score={confidence} />}
       </div>
@@ -95,10 +88,13 @@ export function StreamingMessage({ tokens, citations, confidence }) {
 export default function Message({ role, text, citations, confidence }) {
   if (role === 'user') {
     return (
-      <div className="msg-row user">
-        <div className="msg-avatar">U</div>
-        <div className="msg-bubble">
-          <div className="msg-content">{text}</div>
+      <div className="message-row user">
+        <div className="message-header" style={{ justifyContent: 'flex-end' }}>
+          <span className="msg-role">You</span>
+          <div className="msg-avatar user-av">U</div>
+        </div>
+        <div className="message-bubble">
+          {text}
         </div>
       </div>
     )
@@ -106,14 +102,17 @@ export default function Message({ role, text, citations, confidence }) {
 
   const isError = text && text.startsWith('Error:')
   return (
-    <div className="msg-row assistant">
-      <div className="msg-avatar">D</div>
-      <div className="msg-bubble">
+    <div className="message-row assistant">
+      <div className="message-header">
+        <div className="msg-avatar ai-av">D</div>
+        <span className="msg-role">DocMind</span>
+      </div>
+      <div className="message-bubble">
         {isError ? (
-          <div className="msg-content msg-error">{text}</div>
+          <div className="message-error">{text}</div>
         ) : (
           <div
-            className="msg-content markdown-body"
+            className="md-body"
             dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }}
           />
         )}
