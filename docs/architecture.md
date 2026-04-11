@@ -11,201 +11,242 @@ Every answer is grounded exclusively in uploaded PDF content. No prior knowledge
 ## Layer Model
 
 ```
-┌───────────────────────────────────────────────────────────────────┐
-│                         CLIENT                                    │
-│        PDF Upload                     Question                    │
-└───────────────┬───────────────────────────────┬───────────────────┘
-                │                               │
-                ▼                               ▼
-┌───────────────────────────────────────────────────────────────────┐
-│                   AUTH LAYER  (app/auth/, app/api/v1/auth.py)     │
-│  POST /auth/register   POST /auth/login   GET /auth/me            │
-│  bcrypt password hashing · python-jose JWT · UserStore (SQLite)   │
-│  All /documents, /sessions, /query endpoints require Bearer token │
-└───────────────┬───────────────────────────────┬───────────────────┘
-                │                               │
-                ▼                               ▼
-┌───────────────────────────────────────────────────────────────────┐
-│                      API LAYER  (app/api/)                        │
-│  /documents/upload          /query          /query/stream         │
-│  /sessions                  /health                               │
-│  Thin handlers: validate → delegate → map response                │
-└───────────────┬───────────────────────────────┬───────────────────┘
-                │                               │
-                ▼                               ▼
-┌─────────────────────────┐   ┌─────────────────────────────────────┐
-│  INGESTION PIPELINE     │   │  RAG PIPELINE  (app/pipeline/)      │
-│  (app/pipeline/)        │   │                                     │
-│                         │   │  Single entry point for all         │
-│  Orchestrates:          │   │  query-answer operations.           │
-│  PDF parse → clean      │   │  Orchestrates: cache check →        │
-│  → chunk → embed        │   │  reformulate → embed (cached) →     │
-│  → vector store         │   │  retrieve → rerank → MMR →          │
-│  → registry update      │   │  memory read → generate (cached) → │
-│                         │   │  memory write                       │
-└─────────────────────────┘   └─────────────────────────────────────┘
-                │                               │
-                └───────────────┬───────────────┘
-                                │ calls
-          ┌─────────────────────┼──────────────────────────┐
-          │                     │                          │
-          ▼                     ▼                          ▼
-┌──────────────────┐  ┌─────────────────────┐  ┌──────────────────┐
-│  SERVICES        │  │  CACHE LAYER        │  │  MEMORY LAYER    │
-│  (app/services/) │  │  (app/cache/)       │  │  (app/memory/)   │
-│                  │  │                     │  │                  │
-│  pdf_processor   │  │  EmbeddingCache     │  │  MemoryManager   │
-│  text_cleaner    │  │    sha256(query)    │  │    orchestrates  │
-│  chunker         │  │    → 24h TTL        │  │                  │
-│  embedder        │  │                     │  │  ContextBuilder  │
-│  retriever       │  │  ResponseCache      │  │    token-budgets │
-│  reranker        │  │    (session,query,  │  │    history       │
-│  generator       │  │     docs, turns)    │  │                  │
-│  query_reformulator  │    → 60s TTL       │  │  MemoryCompressor│
-│  streaming       │  │                     │  │    summarises    │
-└──────────────────┘  └─────────────────────┘  │    old turns     │
-          │                     │               └──────────────────┘
-          │                     │
-          ▼                     ▼
-┌──────────────────────────────────────────────────────────────────┐
-│  CHAINS LAYER  (app/chains/)                                     │
-│  LLM-specific only: prompt assembly, OpenAI call, citation parse │
-│  RAGChain — called by RAGPipeline only                           │
-└──────────────────────────────────────────────────────────────────┘
-          │                     │
-          ▼                     ▼
-┌─────────────────┐   ┌──────────────────────────────────────────┐
-│  DB / STORAGE   │   │  DOMAIN MODELS + SCHEMAS                 │
-│  (app/db/)      │   │  (app/models/, app/schemas/)             │
-│                 │   │                                          │
-│  VectorStore    │   │  QueryContext, ScoredChunk,              │
-│  ChromaStore ◄──┼── │  GeneratedAnswer, PipelineMetadata       │
-│  FAISSStore     │   │  ChunkMetadata, RetrievalMetadata        │
-│  SessionStore   │   │  User (auth user model)                  │
-│  DocumentReg.   │   │  (typed, validated, single source of     │
-│  UserStore      │   │   truth for all data shapes)             │
-└─────────────────┘   └──────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│                    CLIENT  (React + Vite SPA)                      │
+│  Dark GPT-style UI · Off-canvas mobile sidebar · SSE streaming     │
+│  localStorage auth/session state · marked.js Markdown rendering    │
+└───────────────┬────────────────────────────────┬───────────────────┘
+                │                                │
+                ▼                                ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                    AUTH LAYER  (app/api/v1/auth.py)                │
+│  POST /auth/register          POST /auth/login                     │
+│  GET  /auth/google            GET  /auth/google/callback           │
+│  POST /auth/forgot-password   POST /auth/reset-password            │
+│  GET  /auth/me                POST /auth/logout                    │
+│                                                                    │
+│  bcrypt · python-jose JWT (HS256, 1-year TTL)                      │
+│  UserStore (PostgreSQL) · TokenBlocklist (PostgreSQL)              │
+│  PasswordResetStore (PostgreSQL) · Google OAuth 2.0 (optional)     │
+└───────────────┬────────────────────────────────┬───────────────────┘
+                │                                │
+                ▼                                ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                       API LAYER  (app/api/)                        │
+│  /documents/upload   /documents/{id}   /documents                  │
+│  /sessions           /sessions/{id}                                │
+│  /query              /query/stream                                 │
+│  /health             /debug/index      /debug/search               │
+│                                                                    │
+│  Token-bucket rate limiter (asyncio.Lock per user_id)              │
+│  Session ownership enforcement (user_id checked on get/delete)     │
+│  Thin handlers: validate → delegate → map response                 │
+└───────────────┬────────────────────────────────┬───────────────────┘
+                │                                │
+                ▼                                ▼
+┌──────────────────────────┐   ┌────────────────────────────────────┐
+│  INGESTION PIPELINE      │   │  RAG PIPELINE  (app/pipeline/)     │
+│  (app/pipeline/)         │   │                                    │
+│                          │   │  cache check → reformulate →       │
+│  PDF parse → clean       │   │  embed (cached) →                  │
+│  → chunk → embed         │   │  hybrid retrieve (vector + FTS     │
+│  → pgvector store        │   │  merged via RRF) → rerank →        │
+│  → registry update       │   │  MMR → memory read →               │
+│  Orphan cleanup on err   │   │  generate (cached) → memory write  │
+└──────────────────────────┘   └────────────────────────────────────┘
+                │                                │
+                └────────────────┬───────────────┘
+                                 │ calls
+          ┌──────────────────────┼──────────────────────────┐
+          │                      │                          │
+          ▼                      ▼                          ▼
+┌───────────────────┐  ┌──────────────────────┐  ┌──────────────────┐
+│  SERVICES         │  │  CACHE LAYER         │  │  MEMORY LAYER    │
+│  (app/services/)  │  │  (app/cache/)        │  │  (app/memory/)   │
+│                   │  │                      │  │                  │
+│  pdf_processor    │  │  EmbeddingCache      │  │  MemoryManager   │
+│  text_cleaner     │  │   sha256(query)→24h  │  │   per-session    │
+│  chunker          │  │                      │  │   asyncio.Lock   │
+│  embedder         │  │  ResponseCache       │  │                  │
+│  retriever        │  │   (session,query,    │  │  ContextBuilder  │
+│  reranker         │  │    docs,turns)→60s   │  │   token-budgets  │
+│  reformulator     │  │                      │  │                  │
+│  streaming        │  └──────────────────────┘  │  MemoryCompressor│
+└───────────────────┘                            └──────────────────┘
+          │
+          ▼
+┌────────────────────────────────────────────────────────────────────┐
+│  CHAINS LAYER  (app/chains/)                                       │
+│  RAGChain — prompt assembly, OpenAI call, citation parse,          │
+│             confidence scoring from normalised cosine similarity   │
+│  prompts.py — system, context_block, history, reformulation        │
+└────────────────────────────────────────────────────────────────────┘
+          │
+          ▼
+┌──────────────────────┐   ┌────────────────────────────────────────┐
+│  DB / STORAGE        │   │  DOMAIN MODELS (app/models/, schemas/) │
+│  (app/db/)           │   │                                        │
+│                      │   │  QueryContext, ScoredChunk             │
+│  PGVectorStore  ◄────┤   │  GeneratedAnswer, PipelineMetadata     │
+│  (pgvector + FTS,    │   │  ChunkMetadata, RetrievalMetadata      │
+│   hybrid/RRF)        │   │  User, Session (user_id field)         │
+│                      │   │  ConversationTurn, Citation            │
+│  FAISSStore          │   └────────────────────────────────────────┘
+│  SessionStore        │
+│  DocumentRegistry    │         PostgreSQL tables
+│  UserStore           │   ┌────────────────────────────────────────┐
+│  TokenBlocklist      │──►│  users              (auth)             │
+│  PasswordResetStore  │   │  token_blocklist    (logout/JWT)       │
+└──────────────────────┘   │  password_resets    (reset flow)       │
+                           │  document_chunks    (pgvector + FTS)   │
+                           └────────────────────────────────────────┘
+                                 JSON files (data/)
+                           ┌────────────────────────────────────────┐
+                           │  sessions.json   (SessionStore)        │
+                           │  registry.json   (DocumentRegistry)    │
+                           └────────────────────────────────────────┘
 ```
 
 ---
 
 ## Component Reference
 
-### Auth Layer (`app/auth/`, `app/api/v1/auth.py`)
+### Auth Layer (`app/api/v1/auth.py`)
 
-| Endpoint | Handler | Delegates to |
-|---|---|---|
-| `POST /auth/register` | `auth.py` | `UserStore.create_user()` + bcrypt hash |
-| `POST /auth/login` | `auth.py` | `UserStore.get_by_email()` + `verify_password()` + JWT issue |
-| `GET /auth/me` | `auth.py` | JWT decode → `UserStore.get_by_id()` |
+| Endpoint | Behaviour |
+|---|---|
+| `POST /auth/register` | bcrypt-hashes password; 409 if email exists or is linked to Google |
+| `POST /auth/login` | Distinct errors: no account (404), Google-only account (400), wrong password (403) |
+| `GET /auth/google` | Redirects to Google consent screen; returns 501 if `GOOGLE_CLIENT_ID` not set |
+| `GET /auth/google/callback` | Exchanges OAuth code for token; creates or loads Google-linked user; redirects to frontend with JWT |
+| `POST /auth/forgot-password` | Always returns 200 (no email enumeration); sends one-time link if SMTP configured |
+| `POST /auth/reset-password` | Validates one-time token from `PasswordResetStore`; issues fresh JWT; token consumed on use |
+| `GET /auth/me` | Returns `user_id`, `email`, `name`, `auth_provider` |
+| `POST /auth/logout` | Adds JWT's JTI to `TokenBlocklist` with remaining TTL; token is blocked immediately |
 
-All other endpoints require `Authorization: Bearer <token>`. The `get_current_user` dependency validates the token and injects the `User` model.
+`get_current_user` dependency (used by all protected routes):
+1. Verifies JWT signature and expiry
+2. Checks `TokenBlocklist` to reject logged-out tokens
+3. Injects the `User` model into the handler
+
+`TokenBlocklist` uses `datetime.now(timezone.utc)` (not the deprecated naive `datetime.utcnow()`) to avoid `TypeError` with asyncpg's `TIMESTAMPTZ` columns.
 
 ### API Layer (`app/api/`)
 
-| Endpoint | Handler | Delegates to |
-|---|---|---|
-| `POST /documents/upload` | `documents.py` | `IngestionPipeline.run()` (BackgroundTask) |
-| `GET /documents/{id}` | `documents.py` | `DocumentRegistry.get()` |
-| `DELETE /documents/{id}` | `documents.py` | `VectorStore.delete_document()` + `DocumentRegistry.delete()` |
-| `POST /query` | `query.py` | `RAGPipeline.run()` |
-| `POST /query/stream` | `query.py` | `RAGPipeline.run_stream()` |
-| `POST /sessions` | `sessions.py` | `SessionStore.create_session()` |
-| `GET /sessions/{id}` | `sessions.py` | `SessionStore.get_session()` |
-| `DELETE /sessions/{id}` | `sessions.py` | `SessionStore.delete_session()` |
-| `GET /health` | `health.py` | VectorStore + OpenAI + DocumentRegistry stats |
+| Endpoint | Delegates to |
+|---|---|
+| `POST /documents/upload` | `IngestionPipeline.run()` as BackgroundTask; orphan file cleanup if registry raises |
+| `GET /documents/{id}` | `DocumentRegistry.get()` |
+| `DELETE /documents/{id}` | `VectorStore.delete_document()` + `DocumentRegistry.delete()` |
+| `GET /documents` | `DocumentRegistry.get_all()` |
+| `POST /sessions` | `SessionStore.create_session(user_id=current_user.user_id)` |
+| `GET /sessions/{id}` | Ownership check → `SessionStore.get_session()` |
+| `DELETE /sessions/{id}` | Ownership check → `SessionStore.delete_session()` |
+| `POST /query` | `RAGPipeline.run()` |
+| `POST /query/stream` | `RAGPipeline.run_stream()` → `StreamingHandler` SSE |
+| `GET /health` | VectorStore stats + OpenAI ping + upload dir check |
+| `GET /debug/index` | Index stats + registry doc list |
+| `GET /debug/search` | Shared `app.state.embedder` → raw similarity scores |
+
+**Rate limiter**: token-bucket per `user_id`. All bucket read-check-append operations are wrapped in `asyncio.Lock` to eliminate the TOCTOU race under concurrent async requests.
+
+**Session ownership**: `Session.user_id` stored at creation. `get_session` and `delete_session` raise `SessionNotFoundError` (indistinguishable from not-found) when `session.user_id != current_user.user_id` — prevents session ID enumeration across users.
 
 ### Pipeline Layer (`app/pipeline/`)
 
-**`rag_pipeline.py`** — the single orchestrator for all query operations. No service, cache, or memory module is called by the API or by other services — only by this pipeline.
+**`rag_pipeline.py`** — single orchestrator. Services, caches, and memory modules are only ever called from here. The API layer does not call them directly.
 
-**`ingestion_pipeline.py`** — the single orchestrator for all PDF ingestion. Called as a FastAPI `BackgroundTask` after the API handler returns 202.
+**`ingestion_pipeline.py`** — single orchestrator for PDF processing. Runs as a FastAPI BackgroundTask. On any error after file save, the orphan file is removed via `os.unlink`.
 
 ### Services Layer (`app/services/`)
 
-Each service has a single responsibility and knows nothing about caches, memory, or the pipeline order.
-
 | Service | Responsibility |
 |---|---|
-| `pdf_processor` | Parse PDF: PyMuPDF → pdfplumber → Tesseract OCR (3-level fallback) |
-| `text_cleaner` | Normalize extracted text (6 operations) |
-| `chunker` | Split text into 512-token chunks with overlap |
-| `embedder` | Batch embed chunks via OpenAI API |
-| `retriever` | Vector search + threshold filter + MMR selection |
-| `reranker` | Cross-encoder second-pass relevance scoring (optional) |
-| `generator` | (moved to chains layer — see below) |
-| `query_reformulator` | Always runs: expands vague/follow-up queries into searchable standalone form |
-| `streaming` | Format SSE events from async token generator |
+| `pdf_processor` | PDF parsing: PyMuPDF → pdfplumber → Tesseract OCR (3-level fallback); garbled-text detection triggers auto-fallback |
+| `text_cleaner` | Normalise extracted text: whitespace, ligatures, mojibake, hyphenation, control chars, line noise |
+| `chunker` | Recursive character split: 512 tokens, 64-token overlap, boundary hierarchy `\n\n → \n → . → ` ` |
+| `embedder` | Batch-embed via OpenAI `text-embedding-3-small` (100 chunks/batch); shared via `app.state.embedder` |
+| `retriever` | Hybrid vector + FTS search → RRF merge → threshold filter → MMR selection |
+| `reranker` | Optional cross-encoder / Cohere second-pass reranking; graceful fallback to bi-encoder order on error |
+| `query_reformulator` | Runs on every query: coreference resolution + inference expansion |
+| `streaming` | Wraps token generator as SSE; `X-Query-Id` header only set when `query_id` is available |
 
 ### Chains Layer (`app/chains/`)
 
-Narrowed to LLM-only concerns. Called exclusively by `RAGPipeline`.
-
 | Module | Responsibility |
 |---|---|
-| `rag_chain.py` | Build prompt, call OpenAI (direct SDK), extract citations, score confidence |
-| `prompts.py` | All prompt templates (system, context, history, reformulation) |
+| `rag_chain.py` | Prompt assembly, OpenAI `gpt-4o` call (`temperature=0.1`), `[Source N]` citation extraction, confidence from normalised cosine similarity |
+| `prompts.py` | All prompt templates: system, context_block, history, reformulation |
 
 ### Cache Layer (`app/cache/`)
 
-| Module | What is cached | Key | TTL |
+| Cache | What is stored | Key | TTL |
 |---|---|---|---|
-| `embedding_cache` | Query embeddings | sha256(normalised query) | 24h |
-| `response_cache` | Full `GeneratedAnswer` | sha256(session+query+docs+turns) | 60s |
-| `in_memory_cache` | Backend (LRU dict) | — | configurable |
-| `cache_backend` | Abstract interface | — | — |
+| `EmbeddingCache` | 1536-dim query vectors | sha256(normalised query) | 24h |
+| `ResponseCache` | Full `GeneratedAnswer` | sha256(session + query + docs + turn_count) | 60s |
 
 ### Memory Layer (`app/memory/`)
 
 | Module | Responsibility |
 |---|---|
-| `memory_manager` | Orchestrates memory read (pre-generation) and write (post-generation) |
-| `context_builder` | Serialises `ConversationTurn` list into token-budgeted history string |
-| `memory_compressor` | Summarises oldest N turns when session exceeds threshold |
+| `MemoryManager` | Orchestrates history read/write; per-session `asyncio.Lock` makes the update→compress→replace sequence atomic, preventing concurrent turns from corrupting history |
+| `ContextBuilder` | Serialises `ConversationTurn` list to a token-budgeted string (1024-token default); trims oldest turns first |
+| `MemoryCompressor` | Summarises oldest N turns into a compressed summary when `turn_count` exceeds threshold |
 
 ### DB / Storage Layer (`app/db/`)
 
-| Module | Responsibility |
+| Module | Backend | Responsibility |
+|---|---|---|
+| `PGVectorStore` | PostgreSQL + pgvector | Cosine similarity search (`<=>` operator) + PostgreSQL FTS (`ts_rank_cd`); hybrid merged via RRF |
+| `FAISSStore` | FAISS `IndexFlatIP` | Optional in-process store; fetches all vectors when filtering by `document_id` |
+| `ChromaStore` | ChromaDB | Legacy; not wired by default |
+| `SessionStore` | `data/sessions.json` | Session CRUD + TTL expiry; persists `user_id` for ownership enforcement |
+| `DocumentRegistry` | `data/registry.json` | Document status, metadata, ingestion results |
+| `UserStore` | PostgreSQL via asyncpg | User CRUD; supports email/password and Google OAuth accounts |
+| `TokenBlocklist` | PostgreSQL via asyncpg | Blocked JTI values + expiry; cleanup task runs in background loop |
+| `PasswordResetStore` | PostgreSQL via asyncpg | One-time reset tokens with expiry |
+
+**Active default**: `PGVectorStore` (wired in `app/dependencies.py`). Same PostgreSQL instance as user/auth data — one `DATABASE_URL` covers everything.
+
+---
+
+## Frontend (React + Vite SPA)
+
+Built by Vite, output to `app/frontend/`, served as static files by FastAPI. SPA catch-all: unknown routes return `index.html` via the 404 handler.
+
+| File | Role |
 |---|---|
-| `vector_store` | Abstract interface: add_chunks, search, delete_document |
-| `chroma_store` | ChromaDB persistent collection (default) |
-| `faiss_store` | FAISS IndexFlatIP + parallel metadata dict |
-| `session_store` | Session CRUD with TTL expiry; persists to `data/sessions.json` |
-| `document_registry` | Document status and metadata tracking; persists to `data/registry.json` |
-| `user_store` | User CRUD via aiosqlite; persists to `data/users.db` |
+| `frontend/src/api.js` | `apiFetch` wrapper: auth headers, error normalisation, 401 silent redirect |
+| `frontend/src/store.js` | localStorage persistence: sessions, auth tokens |
+| `frontend/src/components/ChatApp.jsx` | Main chat UI: sidebar history, upload, SSE streaming, mobile hamburger |
+| `frontend/src/components/AuthPage.jsx` | Login / register / Google OAuth / forgot + reset password modals |
+| `frontend/src/components/Message.jsx` | Message bubbles, citation chips, confidence badge, markdown body |
+| `frontend/src/App.jsx` | Root: auth state machine, OAuth callback URL parsing, toast management |
+
+Design: dark theme (`#212121` bg, `#10a37f` accent), Outfit font, responsive off-canvas sidebar on mobile (`≤768px`).
 
 ---
 
 ## Key Design Decisions
 
-### 1. Pipeline Layer Separates Orchestration from Services
-`RAGPipeline` owns the stage order and wiring. Services, caches, and memory modules are independent — none call each other directly. This makes each unit testable in isolation and the pipeline swappable.
-
-### 2. Chains Layer is LLM-Only
-`rag_chain.py` does not know about sessions, caches, reranking, or memory. It receives a fully-populated `QueryContext` and `RetrievedContext` and returns a `GeneratedAnswer`. This makes it easy to swap LangGraph for a different framework.
-
-### 3. Reranker is Optional and Graceful
-`is_enabled()` guards the reranking step. When disabled, the pipeline is identical to the pre-reranker design (MMR-only). When the reranker fails, it logs a warning and falls back to bi-encoder ordering — the request never fails due to a reranker error.
-
-### 4. JWT Auth at the Boundary
-Authentication is enforced at the API layer via FastAPI's `Depends(get_current_user)`. Every protected handler receives a validated `User` object injected by dependency injection — services and pipelines below the API layer are auth-unaware. Tokens are stored in `localStorage` on the frontend and sent as `Authorization: Bearer` headers.
-
-### 5. Two-Level Caching
-- **Embedding cache** (24h): eliminates the most common bottleneck (repeated queries).
-- **Response cache** (60s): eliminates double-submission LLM calls; includes `turn_count` in the key to prevent stale answers.
-
-### 6. Memory Layer Above Storage Layer
-`session_store` handles persistence (CRUD, TTL). `memory_manager` handles intelligence (what to keep, how to format it, when to compress). Keeping them separate means the storage layer is replaceable (e.g., Redis) without touching memory logic.
-
-### 7. DocumentRegistry Separates Document State from Vectors
-Document status, PDF metadata, and ingestion results are stored in `DocumentRegistry`. Chunk vectors are stored in `VectorStore`. Neither knows about the other; `IngestionPipeline` coordinates them.
+| Decision | Rationale |
+|---|---|
+| PostgreSQL as unified backend | One `DATABASE_URL` covers auth, vectors, blocklist, resets. No extra infra on Railway. |
+| Hybrid search (vector + FTS) via RRF | Recovers exact-match terms (IDs, names, codes) that score low on embeddings alone |
+| Per-session `asyncio.Lock` in MemoryManager | Makes update→compress→replace atomic; prevents history corruption under concurrent turns |
+| `asyncio.Lock` in rate limiter | Eliminates TOCTOU race when multiple coroutines check the same bucket simultaneously |
+| `datetime.now(timezone.utc)` everywhere | Avoids `TypeError` with asyncpg `TIMESTAMPTZ`; naive `utcnow()` was a runtime bug |
+| Session ownership via `user_id` | Prevents cross-user session access; error is identical to not-found (no info leak) |
+| Orphan cleanup on upload error | If `DocumentRegistry.register()` fails after file save, the file is removed immediately |
+| Shared `app.state.embedder` | All callers (pipeline, debug endpoint) reuse the same cached embedder instance |
+| JWT blocklist on logout | Stateless JWTs can't be invalidated; blocklist closes the logout gap within token TTL |
 
 ---
 
 ## Scalability Path
 
-| Scale | Vector Store | Sessions | Deployment |
+| Scale | Vector Store | Auth/Sessions | Deployment |
 |---|---|---|---|
-| Dev | ChromaDB (persistent) | In-memory dict | Single container |
-| Small prod | ChromaDB (persistent) | In-memory + Redis eviction | Docker Compose |
-| Large prod | Pinecone / Weaviate | Redis Cluster | Kubernetes |
+| Dev | PGVectorStore (Docker Compose) | PostgreSQL + JSON files | Single compose stack |
+| Small prod | PGVectorStore (Railway PostgreSQL) | PostgreSQL + JSON files | Railway single service |
+| Large prod | Pinecone / Weaviate | PostgreSQL (managed) + Redis sessions | Kubernetes |
